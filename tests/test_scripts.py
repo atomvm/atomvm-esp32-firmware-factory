@@ -178,6 +178,7 @@ class MakeBundleTest(BundleTestCase):
         self.assertIn("Application partition (main.avm): 0x250000\n", flash)
         self.assertIn("--flash_mode dio --flash_freq 80m --flash_size detect", flash)
         self.assertIn(f"    0x0 {STEM}.img\n", flash)
+        self.assertIn("erases the NVS partition", flash)
 
     def test_deterministic(self):
         out1, _, sha1 = self.bundle()
