@@ -111,6 +111,8 @@ jobs:
       CFLAGS: -O3
       CXXFLAGS: -O3
       ImageOS: ubuntu24
+      LC_ALL: C.UTF-8
+      LANG: C.UTF-8
       CHIP: ${{ matrix.chip }}
       FEATURES: ${{ matrix.features }}
       ELIXIR: ${{ matrix.elixir }}
