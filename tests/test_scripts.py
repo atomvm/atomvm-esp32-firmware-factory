@@ -132,7 +132,9 @@ class ApplyFragmentsTest(unittest.TestCase):
             self.assertEqual(template.read_text(), TEMPLATE)
 
 
-class MakeBundleTest(unittest.TestCase):
+class BundleTestCase(unittest.TestCase):
+    """Shared bundle fixture; holds no tests itself."""
+
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -154,6 +156,8 @@ class MakeBundleTest(unittest.TestCase):
         args.update(overrides)
         return make_bundle.build_bundle(**args)
 
+
+class MakeBundleTest(BundleTestCase):
     def test_members_in_order_and_checksum(self):
         out, img_sha, _ = self.bundle()
         with zipfile.ZipFile(out) as bundle:
@@ -218,7 +222,7 @@ class MakeBundleTest(unittest.TestCase):
 
 
 @unittest.skipUnless(shutil.which("escript"), "escript not available")
-class VerifyBundleTest(MakeBundleTest):
+class VerifyBundleTest(BundleTestCase):
     script = SCRIPTS / "verify_bundle.escript"
 
     def verify(self, bundle, stem=STEM):
