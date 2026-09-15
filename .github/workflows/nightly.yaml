@@ -350,6 +350,8 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       GH_TOKEN: ${{ github.token }}
+      # this job has no checkout: gh release commands need the repository named
+      GH_REPO: ${{ github.repository }}
       RELEASE_ID: ${{ needs.setup.outputs.release_id }}
       ATOMVM_SHA: ${{ needs.setup.outputs.atomvm_sha }}
       ATOMGL_SHA: ${{ needs.setup.outputs.atomgl_sha }}
@@ -398,12 +400,25 @@ jobs:
 
       - name: Replace the live release
         run: |
-          if gh release view "$CHANNEL" --json id >/dev/null 2>&1; then
-            echo "deleting live release $CHANNEL and its tag"
-            gh release delete "$CHANNEL" --cleanup-tag --yes
+          set -euo pipefail
+          # Read first, so that an API error stops the step before any change.
+          # Every release on the channel tag is deleted by id, including drafts
+          # left by earlier runs, which keep the tag name. The tag goes last:
+          # GitHub turns a published release whose tag disappears into a draft,
+          # and a tag left behind would pin the new release to an old commit.
+          releases=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" \
+            --jq ".[] | select(.tag_name == \"$CHANNEL\" and .id != $RELEASE_ID) | \"\(.id) \(.draft)\"")
+          tag=$(gh api --paginate "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$CHANNEL" \
+            --jq ".[] | select(.ref == \"refs/tags/$CHANNEL\") | .ref")
+          while read -r id draft; do
+            [ -n "$id" ] || continue
+            echo "deleting release $id on tag $CHANNEL (draft: $draft)"
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/$id"
+          done <<< "$releases"
+          if [ -n "$tag" ]; then
+            echo "deleting tag $CHANNEL"
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/$CHANNEL"
           fi
-          # a tag left behind without a release would pin the new release to an old commit
-          gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/$CHANNEL" >/dev/null 2>&1 || true
           date_iso="${BUILD_DATE:0:4}-${BUILD_DATE:4:2}-${BUILD_DATE:6:2}"
           title="$date_iso — $ATOMVM_REF @ ${ATOMVM_SHA:0:7}"
           gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
