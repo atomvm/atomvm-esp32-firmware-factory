@@ -207,6 +207,38 @@ jobs:
           esac
           "$GITHUB_WORKSPACE/factory/scripts/build_esp32.sh" "$CHIP" "${flags[@]}"
 
+      - name: Collect configure and build logs
+        if: failure()
+        working-directory: ${{ env.ESP32_DIR }}
+        run: |
+          diag="$GITHUB_WORKSPACE/diag"
+          mkdir -p "$diag"
+          cp -r build/log "$diag/idf-log" 2>/dev/null || true
+          cp build/CMakeFiles/CMakeConfigureLog.yaml build/toolchain/cflags build/toolchain/cxxflags \
+             sdkconfig sdkconfig.defaults sdkconfig.defaults.in build.log "$diag/" 2>/dev/null || true
+          # compiler output of every failed configure-time check
+          if [ -f build/CMakeFiles/CMakeConfigureLog.yaml ]; then
+            python3 - <<'PY'
+          import re, yaml
+          log = yaml.safe_load(open("build/CMakeFiles/CMakeConfigureLog.yaml"))
+          for event in log.get("events", []):
+              result = event.get("buildResult") or {}
+              if event.get("kind", "").startswith("try_compile") and result.get("exitCode", 0) != 0:
+                  print("::group::failed check", result.get("variable"), event.get("checks"))
+                  print("C flags:", (event.get("cmakeVariables") or {}).get("CMAKE_C_FLAGS"))
+                  print(result.get("stdout", ""))
+                  print("::endgroup::")
+          PY
+          fi
+          echo "diag-dir=$diag" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: diag-${{ matrix.stem }}
+          path: diag/
+          if-no-files-found: ignore
+
       - name: Create image
         working-directory: ${{ env.ESP32_DIR }}/build
         run: |
