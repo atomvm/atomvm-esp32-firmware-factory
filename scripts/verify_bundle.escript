@@ -35,7 +35,8 @@ verify(Zip, Stem) ->
 
 check_members(Members, Stem) ->
     Img = Stem ++ ".img",
-    Parts = ["bootloader.bin", "partition-table.bin", "atomvm-esp32.bin", boot_library(Stem)],
+    Parts = ["bootloader.bin", "partition-table.bin", "atomvm-esp32.bin", boot_library(Stem),
+             "atomvm-esp32.elf", "atomvm-esp32.map", "bootloader.elf", "bootloader.map", "prefix_map_gdbinit"],
     Summed = [Img, "sdkconfig", "partitions.csv", "FLASH.txt" | Parts],
     Expected = [Img, Img ++ ".sha256", "sdkconfig", "partitions.csv", "FLASH.txt"] ++ Parts ++ ["SHA256SUMS"],
     Names = [Name || {Name, _} <- Members],

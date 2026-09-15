@@ -5,13 +5,16 @@ usage: make_bundle.py --stem STEM --chip CHIP --img IMG --sdkconfig SDKCONFIG
                       --partitions-dir DIR --build-dir BUILD --out OUTDIR
                       [--source-date-epoch N]
 
-BUILD is the ESP-IDF build directory; the flashed files and their offsets are
-read from BUILD/flasher_args.json.
+BUILD is the ESP-IDF build directory: the flashed files and their offsets are
+read from BUILD/flasher_args.json, and the ELF, map and GDB files from their
+usual places in it.
 
 Writes OUTDIR/STEM.zip containing exactly, in this order:
   STEM.img, STEM.img.sha256, sdkconfig, partitions.csv, FLASH.txt,
   bootloader.bin, partition-table.bin, atomvm-esp32.bin, the boot library
-  (esp32boot.avm, or elixir_esp32boot.avm for -elixir images), SHA256SUMS
+  (esp32boot.avm, or elixir_esp32boot.avm for -elixir images),
+  atomvm-esp32.elf, atomvm-esp32.map, bootloader.elf, bootloader.map,
+  prefix_map_gdbinit, SHA256SUMS
 The binaries are the parts of the image. DEFLATE only, fixed timestamps, no
 extra attributes: identical inputs give an identical bundle, and OTP's zip
 module can read it.
@@ -45,6 +48,10 @@ FLASH_OFFSETS = {
 # names their files get in the bundle; the boot library keeps its own name.
 FLASH_ENTRIES = ("bootloader", "partition-table", "app", "boot.avm")
 PART_NAMES = {"bootloader": "bootloader.bin", "partition-table": "partition-table.bin", "app": "atomvm-esp32.bin"}
+
+# Debug files, relative to the build directory; they keep their base names.
+DEBUG_FILES = ("atomvm-esp32.elf", "atomvm-esp32.map", "bootloader/bootloader.elf", "bootloader/bootloader.map",
+               "prefix_map_gdbinit")
 
 DEFAULT_EPOCH = 315532800  # 1980-01-01, the earliest zip timestamp
 
@@ -102,6 +109,17 @@ def read_flash_parts(build_dir):
     return flasher["flash_settings"], parts
 
 
+def read_debug_files(build_dir):
+    """The debug files as (name, data)."""
+    members = []
+    for relative in DEBUG_FILES:
+        file = Path(build_dir) / relative
+        if not file.is_file():
+            raise BundleError(f"{file} not found")
+        members.append((file.name, file.read_bytes()))
+    return members
+
+
 def check_parts_in_image(img_name, img, parts, base):
     """Each part must be in the image at its offset: install and update write the same bytes."""
     for part in parts:
@@ -115,7 +133,7 @@ def sha256sums(members):
     return "".join(f"{hashlib.sha256(data).hexdigest()}  {name}\n" for name, data in members).encode()
 
 
-def flash_txt(stem, chip, base, flash_settings, parts, main_avm, stamp, idf):
+def flash_txt(stem, chip, base, flash_settings, parts, main_avm, stamp, idf, elf_sha):
     """Instructions shipped as FLASH.txt: install the image, or update an installation."""
     bootloader, table, vm, boot = parts
     port = f"--chip {chip} --port /dev/ttyUSB0 --baud 921600"
@@ -184,6 +202,30 @@ def flash_txt(stem, chip, base, flash_settings, parts, main_avm, stamp, idf):
         "\n"
         "The binaries are the parts of the image, byte for byte, at these offsets:\n"
         f"{contents}"
+        "\n"
+        "Debugging\n"
+        "---------\n"
+        "\n"
+        "atomvm-esp32.elf and bootloader.elf hold the symbols of this image, and the\n"
+        "map files show where the linker placed each function and variable. The board\n"
+        "prints the start of the app's ELF SHA-256 at boot and on panics, in a line like\n"
+        f"\"ELF file SHA256:  {elf_sha[:9]}...\". It must match this image's ELF:\n"
+        f"  {elf_sha}\n"
+        "\n"
+        "Decode backtraces while the board runs, from an ESP-IDF environment:\n"
+        f"  python -m esp_idf_monitor --port /dev/ttyUSB0 --target {chip} \\\n"
+        "    atomvm-esp32.elf bootloader.elf\n"
+        "\n"
+        "Decode addresses from a saved log with the toolchain's addr2line\n"
+        "(xtensa-<chip>-elf- or riscv32-esp-elf-):\n"
+        "  addr2line -pfiaC -e atomvm-esp32.elf <address>...\n"
+        "\n"
+        "GDB finds sources by their build-time paths, listed in prefix_map_gdbinit:\n"
+        "ESP-IDF and the AtomVM ESP32 components were recorded under placeholder paths\n"
+        "that the file maps back to the build's paths. Replace those build paths in\n"
+        "the file with your own ESP-IDF and AtomVM checkouts, then \"source\" it in GDB\n"
+        "and add a \"set substitute-path\" rule from the AtomVM build path to your\n"
+        "checkout for AtomVM's core sources.\n"
     )
 
 
@@ -219,14 +261,16 @@ def build_bundle(stem, chip, img_path, sdkconfig_path, partitions_dir, build_dir
     csv_text = (Path(partitions_dir) / csv_name).read_text()
     main_avm = partition_offset(csv_text, "main.avm")
     stamp = sdkconfig_value(sdkconfig, "CONFIG_APP_PROJECT_VER") or "unknown"
+    debug_members = read_debug_files(build_dir)
+    elf_sha = hashlib.sha256(debug_members[0][1]).hexdigest()
 
     summed = [
         (f"{stem}.img", img),
         ("sdkconfig", sdkconfig.encode()),
         ("partitions.csv", csv_text.encode()),
         ("FLASH.txt", flash_txt(stem, chip, base, flash_settings, parts, main_avm, stamp,
-                                idf_version(sdkconfig)).encode()),
-    ] + [(part.name, part.data) for part in parts]
+                                idf_version(sdkconfig), elf_sha).encode()),
+    ] + [(part.name, part.data) for part in parts] + debug_members
     members = ([summed[0], (f"{stem}.img.sha256", f"{img_sha}  {stem}.img\n".encode())]
                + summed[1:] + [("SHA256SUMS", sha256sums(summed))])
 

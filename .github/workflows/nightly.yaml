@@ -327,15 +327,17 @@ jobs:
         run: |
           . "$IDF_PATH/export.sh" >/dev/null
           idf_version=$(idf.py --version | tail -n1)
+          elf_sha256=$(sha256sum "$ESP32_DIR/build/atomvm-esp32.elf" | cut -d' ' -f1)
           mkdir -p meta
           jq -n \
             --arg stem "$STEM" --arg chip "$CHIP" --arg features "$FEATURES" --arg elixir "$ELIXIR" \
             --arg optimization "$OPTIMIZATION" --arg sha256 "$SHA256" --arg size "$SIZE" \
             --arg atomvm_sha "$ATOMVM_SHA" --arg atomgl_sha "$ATOMGL_SHA" \
-            --arg idf_version "$idf_version" --arg stamp "$STAMP" \
+            --arg idf_version "$idf_version" --arg stamp "$STAMP" --arg elf_sha256 "$elf_sha256" \
             '{stem: $stem, chip: $chip, features: $features, elixir: ($elixir == "true"),
               optimization: $optimization, sha256: $sha256, size: ($size | tonumber),
-              atomvm_sha: $atomvm_sha, atomgl_sha: $atomgl_sha, idf_version: $idf_version, stamp: $stamp}' \
+              atomvm_sha: $atomvm_sha, atomgl_sha: $atomgl_sha, idf_version: $idf_version, stamp: $stamp,
+              elf_sha256: $elf_sha256}' \
             > "meta/$STEM.json"
           cat "meta/$STEM.json"
 
@@ -389,13 +391,15 @@ jobs:
             echo "- Build stamp: \`$STAMP\`"
             echo "- Factory: [\`${GITHUB_SHA:0:7}\`](https://github.com/$GITHUB_REPOSITORY/commit/$GITHUB_SHA), [run $GITHUB_RUN_ID]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)"
             echo
-            echo "| Image | Optimization | Size | SHA-256 | Status |"
-            echo "|---|---|---|---|---|"
-            jq -r '"| `\(.stem).zip` | \({PERF: "-O2", SIZE: "-Os", DEBUG: "-Og", NONE: "-O0"}[.optimization] // .optimization) | \(.size) | `\(.sha256)` | fresh |"' meta/*.json
+            echo "| Image | Optimization | Size | SHA-256 | ELF SHA-256 | Status |"
+            echo "|---|---|---|---|---|---|"
+            jq -r '"| `\(.stem).zip` | \({PERF: "-O2", SIZE: "-Os", DEBUG: "-Og", NONE: "-O0"}[.optimization] // .optimization) | \(.size) | `\(.sha256)` | `\(.elf_sha256[0:9])` | fresh |"' meta/*.json
             echo
             echo "Each bundle contains the image, the resolved \`sdkconfig\` and partition table, the image's parts"
-            echo "as separate binaries, SHA-256 checksums, and \`FLASH.txt\` with the esptool commands to install the"
-            echo "image or to update an existing AtomVM installation without erasing NVS or \`main.avm\`."
+            echo "as separate binaries, the ELF and map files, SHA-256 checksums, and \`FLASH.txt\` with the esptool"
+            echo "commands to install the image or to update an existing AtomVM installation without erasing NVS or"
+            echo "\`main.avm\`, and with how to decode crashes. The ELF SHA-256 column shows the prefix a board prints"
+            echo "at boot and on panics, to match a crash log to its bundle."
           } > notes.md
           cat notes.md
 

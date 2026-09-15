@@ -5,8 +5,9 @@ firmware images for ESP32-family chips.
 
 Images are built by GitHub Actions and published as release assets, one zip
 bundle per image. Each bundle contains the `.img` file, the `sdkconfig` and
-partition table it was built with, the image's parts as separate binaries,
-SHA-256 checksums, and `FLASH.txt` with the flashing instructions.
+partition table it was built with, the image's parts as separate binaries, the
+ELF and map files to decode crashes, SHA-256 checksums, and `FLASH.txt` with
+the flashing and debugging instructions.
 
 `FLASH.txt` describes two ways to flash a board:
 

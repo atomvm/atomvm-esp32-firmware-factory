@@ -143,6 +143,9 @@ PARTITION_TABLE = bytes(range(256)) * 12
 APP = b"\xe9\x06\x02\x2f" + bytes(range(256)) * 400
 BOOT_LIBRARY = b"#!/usr/bin/env AtomVM\n\0\0" + bytes(range(255, -1, -1)) * 300
 PARTS = ("bootloader.bin", "partition-table.bin", "atomvm-esp32.bin", "esp32boot.avm")
+DEBUG_FILES = ("atomvm-esp32.elf", "atomvm-esp32.map", "bootloader/bootloader.elf", "bootloader/bootloader.map",
+               "prefix_map_gdbinit")
+APP_ELF = b"\x7fELF\x01\x01\x01\x00" + bytes(range(256)) * 50
 ENTRIES = ("bootloader", "partition-table", "app", "boot.avm")
 
 
@@ -176,6 +179,11 @@ class BundleTestCase(unittest.TestCase):
         (self.build_dir / "partition_table" / "partition-table.bin").write_bytes(PARTITION_TABLE)
         (self.build_dir / "atomvm-esp32.bin").write_bytes(APP)
         (self.libs_dir / "esp32boot.avm").write_bytes(BOOT_LIBRARY)
+        (self.build_dir / "atomvm-esp32.elf").write_bytes(APP_ELF)
+        (self.build_dir / "atomvm-esp32.map").write_text("Linker script and memory map\n")
+        (self.build_dir / "bootloader" / "bootloader.elf").write_bytes(b"\x7fELF" + bytes(range(255, -1, -1)) * 8)
+        (self.build_dir / "bootloader" / "bootloader.map").write_text("bootloader memory map\n")
+        (self.build_dir / "prefix_map_gdbinit").write_text("set substitute-path /IDF /opt/esp/idf\n")
         self.flasher_args = {
             "write_flash_args": ["--flash_mode", "dio", "--flash_size", "4MB", "--flash_freq", "80m"],
             "flash_settings": {"flash_mode": "dio", "flash_size": "4MB", "flash_freq": "80m"},
@@ -238,8 +246,10 @@ class MakeBundleTest(BundleTestCase):
     def test_members_in_order_and_checksum(self):
         out, img_sha, _ = self.bundle()
         with zipfile.ZipFile(out) as bundle:
+            debug_names = [Path(name).name for name in DEBUG_FILES]
             self.assertEqual(bundle.namelist(), [f"{STEM}.img", f"{STEM}.img.sha256", "sdkconfig",
-                                                 "partitions.csv", "FLASH.txt", *PARTS, "SHA256SUMS"])
+                                                 "partitions.csv", "FLASH.txt", *PARTS, *debug_names,
+                                                 "SHA256SUMS"])
             for info in bundle.infolist():
                 self.assertEqual(info.compress_type, zipfile.ZIP_DEFLATED)
                 self.assertEqual(info.extra, b"")
@@ -250,7 +260,9 @@ class MakeBundleTest(BundleTestCase):
             self.assertEqual(bundle.read("partitions.csv").decode(), PARTITIONS)
             for name, entry in zip(PARTS, ENTRIES):
                 self.assertEqual(bundle.read(name), self.part_path(entry).read_bytes())
-            summed = [f"{STEM}.img", "sdkconfig", "partitions.csv", "FLASH.txt", *PARTS]
+            for relative in DEBUG_FILES:
+                self.assertEqual(bundle.read(Path(relative).name), (self.build_dir / relative).read_bytes())
+            summed = [f"{STEM}.img", "sdkconfig", "partitions.csv", "FLASH.txt", *PARTS, *debug_names]
             self.assertEqual(bundle.read("SHA256SUMS").decode(),
                              "".join(f"{hashlib.sha256(bundle.read(name)).hexdigest()}  {name}\n"
                                      for name in summed))
@@ -314,6 +326,21 @@ class MakeBundleTest(BundleTestCase):
         flash = self.flash_txt()
         self.assertIn("AtomVM build: unknown\n", flash)
         self.assertIn("ESP-IDF: unknown\n", flash)
+
+    def test_flash_txt_debugging(self):
+        flash = self.flash_txt()
+        elf_sha = hashlib.sha256(APP_ELF).hexdigest()
+        self.assertIn(f'"ELF file SHA256:  {elf_sha[:9]}..."', flash)
+        self.assertIn(f"  {elf_sha}\n", flash)
+        self.assertIn("  python -m esp_idf_monitor --port /dev/ttyUSB0 --target esp32s3 \\\n"
+                      "    atomvm-esp32.elf bootloader.elf\n", flash)
+        self.assertIn("  addr2line -pfiaC -e atomvm-esp32.elf <address>...\n", flash)
+        self.assertIn('then "source" it in GDB', flash)
+
+    def test_rejects_missing_debug_file(self):
+        (self.build_dir / "bootloader" / "bootloader.map").unlink()
+        with self.assertRaisesRegex(make_bundle.BundleError, "bootloader.map not found"):
+            self.bundle()
 
     def test_boot_library_keeps_its_name(self):
         self.use_boot_library("elixir_esp32boot.avm")
@@ -407,6 +434,8 @@ class VerifyBundleTest(BundleTestCase):
         self.assertIn(img_sha, proc.stdout)
         for entry in ENTRIES:
             self.assertIn(hashlib.sha256(self.part_path(entry).read_bytes()).hexdigest(), proc.stdout)
+        self.assertIn(f"atomvm-esp32.elf: {len(APP_ELF)} bytes, sha256 {hashlib.sha256(APP_ELF).hexdigest()}",
+                      proc.stdout)
 
     def test_accepts_elixir_bundle(self):
         self.use_boot_library("elixir_esp32boot.avm")
@@ -428,7 +457,7 @@ class VerifyBundleTest(BundleTestCase):
 
     def test_rejects_tampered_members(self):
         out, _, _ = self.bundle()
-        for member in (f"{STEM}.img", "atomvm-esp32.bin", "FLASH.txt"):
+        for member in (f"{STEM}.img", "atomvm-esp32.bin", "FLASH.txt", "atomvm-esp32.elf"):
             with self.subTest(member):
                 tampered = self.rewrite_zip(
                     out, lambda name, data: flip_byte(data, len(data) // 2) if name == member else data)
