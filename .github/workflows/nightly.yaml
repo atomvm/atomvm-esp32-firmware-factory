@@ -205,6 +205,21 @@ jobs:
           case " $FEATURES " in
             *" libsodium "*) flags+=(-DAVM_USE_LIBSODIUM=ON) ;;
           esac
+          # With PSRAM enabled on the ESP32 and ESP32-S3, ESP-IDF compiles everything
+          # with -mdisable-hardware-atomics (CONFIG_STDATOMIC_S32C1I_SPIRAM_WORKAROUND:
+          # the S32C1I instruction cannot operate on PSRAM) and provides C11 atomics
+          # in software. Since ESP-IDF 5.5 that flag is visible to AtomVM's
+          # configure-time check for lock-free atomics, which then fails, although
+          # the same software atomics worked with ESP-IDF 5.4 (HAVE_ATOMIC path).
+          # Pre-seed the check result so that path keeps being used. Drop this once
+          # upstream accepts ESP-IDF's software atomics in that check.
+          case "$CHIP" in
+            esp32|esp32s3)
+              case " $FEATURES " in
+                *" psram "*|*" octalpsram "*) flags+=(-DATOMIC_POINTER_LOCK_FREE_IS_TWO=1) ;;
+              esac
+              ;;
+          esac
           "$GITHUB_WORKSPACE/factory/scripts/build_esp32.sh" "$CHIP" "${flags[@]}"
 
       - name: Collect configure and build logs
