@@ -1,0 +1,364 @@
+# Build the nightly-0.7 channel: one image per matrix entry, published as a
+# rolling GitHub release through a draft swap (create draft -> upload every
+# bundle -> verify -> delete the live release -> publish the draft on the
+# channel tag). The live release is never touched until the draft is complete.
+
+name: nightly-0.7
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: nightly-0.7
+  cancel-in-progress: false
+
+env:
+  CHANNEL: nightly-0.7
+  ATOMVM_REPO: atomvm/AtomVM
+  ATOMVM_REF: release-0.7
+  ATOMGL_REPO: atomvm/atomgl
+  ATOMGL_REF: main
+  IDF_IMAGE: espressif/idf:v5.5.4
+  EXPECTED_ASSETS: "1"
+
+jobs:
+  setup:
+    runs-on: ubuntu-24.04
+    outputs:
+      release_id: ${{ steps.draft.outputs.release_id }}
+      atomvm_sha: ${{ steps.refs.outputs.atomvm_sha }}
+      atomgl_sha: ${{ steps.refs.outputs.atomgl_sha }}
+      build_date: ${{ steps.refs.outputs.build_date }}
+      stamp: ${{ steps.refs.outputs.stamp }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run factory unit tests
+        run: python3 -m unittest discover -s tests -v
+
+      - name: Resolve upstream commits
+        id: refs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          atomvm_sha=$(gh api "repos/$ATOMVM_REPO/commits/$ATOMVM_REF" --jq .sha)
+          atomgl_sha=$(gh api "repos/$ATOMGL_REPO/commits/$ATOMGL_REF" --jq .sha)
+          build_date=$(date -u +%Y%m%d)
+          stamp="$CHANNEL+$build_date.${atomvm_sha:0:7}"
+          {
+            echo "atomvm_sha=$atomvm_sha"
+            echo "atomgl_sha=$atomgl_sha"
+            echo "build_date=$build_date"
+            echo "stamp=$stamp"
+          } >> "$GITHUB_OUTPUT"
+          echo "AtomVM $ATOMVM_REF @ $atomvm_sha, atomgl $ATOMGL_REF @ $atomgl_sha, stamp $stamp"
+
+      - name: Delete stale staging drafts of other runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases" \
+            --jq ".[] | select(.draft and (.tag_name | startswith(\"staging-\")) and .tag_name != \"staging-$GITHUB_RUN_ID\") | .id" \
+          | while read -r id; do
+              echo "deleting stale draft $id"
+              gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/$id"
+            done
+
+      - name: Create the draft release
+        id: draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="staging-$GITHUB_RUN_ID"
+          # reuse the draft of this run when jobs are re-run
+          id=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" \
+                 --jq ".[] | select(.draft and .tag_name == \"$tag\") | .id" | head -n1)
+          if [ -z "$id" ]; then
+            id=$(gh api -X POST "repos/$GITHUB_REPOSITORY/releases" \
+                   -f tag_name="$tag" -f target_commitish="$GITHUB_SHA" \
+                   -f name="$CHANNEL staging (run $GITHUB_RUN_ID)" \
+                   -F draft=true -F prerelease=false --jq .id)
+          fi
+          echo "release_id=$id" >> "$GITHUB_OUTPUT"
+          echo "draft release $id ($tag)"
+
+  build:
+    needs: setup
+    runs-on: ubuntu-24.04
+    container: espressif/idf:v5.5.4
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - chip: esp32s3
+            features: atomgl ipv6 libsodium psram
+            elixir: false
+            stem: AtomVM-esp32s3-atomgl-ipv6-libsodium-psram-nightly-0.7
+    env:
+      # as upstream esp32-mkimage.yaml: host compiler for the libs build,
+      # ImageOS lets erlef/setup-beam run inside the container
+      CC: clang-14
+      CXX: clang++-14
+      CFLAGS: -O3
+      CXXFLAGS: -O3
+      ImageOS: ubuntu24
+      CHIP: ${{ matrix.chip }}
+      FEATURES: ${{ matrix.features }}
+      ELIXIR: ${{ matrix.elixir }}
+      STEM: ${{ matrix.stem }}
+      ESP32_DIR: AtomVM/src/platforms/esp32
+      RELEASE_ID: ${{ needs.setup.outputs.release_id }}
+      ATOMVM_SHA: ${{ needs.setup.outputs.atomvm_sha }}
+      ATOMGL_SHA: ${{ needs.setup.outputs.atomgl_sha }}
+      BUILD_DATE: ${{ needs.setup.outputs.build_date }}
+      STAMP: ${{ needs.setup.outputs.stamp }}
+    steps:
+      - name: Checkout factory
+        uses: actions/checkout@v4
+        with:
+          path: factory
+
+      - name: Checkout AtomVM
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.ATOMVM_REPO }}
+          ref: ${{ needs.setup.outputs.atomvm_sha }}
+          path: AtomVM
+
+      - name: Checkout atomgl
+        if: contains(matrix.features, 'atomgl')
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.ATOMGL_REPO }}
+          ref: ${{ needs.setup.outputs.atomgl_sha }}
+          path: AtomVM/src/platforms/esp32/components/atomgl
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "28"
+          elixir-version: "1.19"
+          rebar3-version: "3.25.1"
+          hexpm-mirrors: |
+            https://builds.hex.pm
+            https://repo.hex.pm
+            https://cdn.jsdelivr.net/hex
+
+      - name: Install host dependencies
+        run: |
+          apt-get update -y
+          DEBIAN_FRONTEND=noninteractive apt-get install -y clang-14 git cmake gperf zlib1g-dev jq
+          # the checkouts are owned by another uid; AtomVM's CMake needs git rev-parse to work
+          git config --global --add safe.directory '*'
+
+      - name: Build AtomVM libraries (host side)
+        working-directory: AtomVM
+        run: |
+          mkdir -p build
+          cd build
+          cmake ..
+          cd libs
+          make
+          ls -l esp32boot/
+
+      - name: Prepare sdkconfig and components
+        working-directory: ${{ env.ESP32_DIR }}
+        run: |
+          cp sdkconfig.release-defaults.in sdkconfig.defaults.in
+          fragments=()
+          for feature in $FEATURES; do
+            if [ -f "$GITHUB_WORKSPACE/factory/features/$feature.sdkconfig" ]; then
+              fragments+=("$GITHUB_WORKSPACE/factory/features/$feature.sdkconfig")
+            fi
+          done
+          python3 "$GITHUB_WORKSPACE/factory/scripts/apply_fragments.py" sdkconfig.defaults.in \
+            --set CONFIG_APP_PROJECT_VER_FROM_CONFIG=y \
+            --set "CONFIG_APP_PROJECT_VER=\"$STAMP\"" \
+            "${fragments[@]}"
+          echo "::group::sdkconfig.defaults.in"
+          cat sdkconfig.defaults.in
+          echo "::endgroup::"
+          case " $FEATURES " in
+            *" libsodium "*)
+              . "$IDF_PATH/export.sh"
+              idf.py add-dependency "espressif/libsodium^1.0.20~4"
+              cat main/idf_component.yml
+              ;;
+          esac
+
+      - name: Build firmware
+        id: build
+        working-directory: ${{ env.ESP32_DIR }}
+        run: |
+          . "$IDF_PATH/export.sh"
+          elixir=off
+          if [ "$ELIXIR" = "true" ]; then elixir=on; fi
+          flags=("-DATOMVM_ELIXIR_SUPPORT=$elixir" -DATOMVM_DEV=ON "-DATOMVM_BUILD_METADATA=$BUILD_DATE")
+          case " $FEATURES " in
+            *" libsodium "*) flags+=(-DAVM_USE_LIBSODIUM=ON) ;;
+          esac
+          "$GITHUB_WORKSPACE/factory/scripts/build_esp32.sh" "$CHIP" "${flags[@]}"
+
+      - name: Create image
+        working-directory: ${{ env.ESP32_DIR }}/build
+        run: |
+          ./mkimage.sh
+          flavor=""
+          if [ "$ELIXIR" = "true" ]; then flavor="-elixir"; fi
+          mv "atomvm-$CHIP$flavor.img" "$STEM.img"
+          ls -l "$STEM.img"
+
+      - name: Assemble and verify bundle
+        working-directory: ${{ env.ESP32_DIR }}
+        run: |
+          epoch=$(date -u -d "$BUILD_DATE" +%s)
+          python3 "$GITHUB_WORKSPACE/factory/scripts/make_bundle.py" \
+            --stem "$STEM" --chip "$CHIP" --img "build/$STEM.img" --sdkconfig sdkconfig \
+            --partitions-dir . --flasher-args build/flasher_args.json \
+            --source-date-epoch "$epoch" --out "$GITHUB_WORKSPACE/dist"
+          escript "$GITHUB_WORKSPACE/factory/scripts/verify_bundle.escript" "$GITHUB_WORKSPACE/dist/$STEM.zip" "$STEM"
+          unzip -l "$GITHUB_WORKSPACE/dist/$STEM.zip"
+          echo "::group::FLASH.txt"
+          unzip -p "$GITHUB_WORKSPACE/dist/$STEM.zip" FLASH.txt
+          echo "::endgroup::"
+
+      - name: Upload bundle to the draft release
+        id: upload
+        working-directory: dist
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          api="https://api.github.com/repos/$GITHUB_REPOSITORY"
+          auth=(-H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28")
+          asset="$STEM.zip"
+          local_sha=$(sha256sum "$asset" | cut -d' ' -f1)
+          # drop a same-named asset left by a previous attempt of this run
+          curl -fsS "${auth[@]}" "$api/releases/$RELEASE_ID/assets?per_page=100" \
+            | jq -r --arg name "$asset" '.[] | select(.name == $name) | .id' \
+            | while read -r id; do
+                echo "deleting previous asset $id"
+                curl -fsS -X DELETE "${auth[@]}" "$api/releases/assets/$id"
+              done
+          asset_id=$(curl -fsS -X POST "${auth[@]}" -H "Content-Type: application/zip" \
+                       --data-binary "@$asset" \
+                       "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?name=$asset" \
+                     | jq -r .id)
+          echo "uploaded $asset as asset $asset_id"
+          digest=null
+          for attempt in $(seq 1 10); do
+            digest=$(curl -fsS "${auth[@]}" "$api/releases/assets/$asset_id" | jq -r '.digest // "null"')
+            if [ "$digest" != "null" ]; then break; fi
+            echo "digest not available yet (attempt $attempt)"
+            sleep 3
+          done
+          echo "local  sha256:$local_sha"
+          echo "github $digest"
+          if [ "$digest" != "sha256:$local_sha" ]; then
+            echo "::error::asset digest mismatch or unavailable"
+            exit 1
+          fi
+          {
+            echo "sha256=$local_sha"
+            echo "size=$(stat -c %s "$asset")"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Record build metadata
+        env:
+          OPTIMIZATION: ${{ steps.build.outputs.optimization }}
+          SHA256: ${{ steps.upload.outputs.sha256 }}
+          SIZE: ${{ steps.upload.outputs.size }}
+        run: |
+          . "$IDF_PATH/export.sh" >/dev/null
+          idf_version=$(idf.py --version | tail -n1)
+          mkdir -p meta
+          jq -n \
+            --arg stem "$STEM" --arg chip "$CHIP" --arg features "$FEATURES" --arg elixir "$ELIXIR" \
+            --arg optimization "$OPTIMIZATION" --arg sha256 "$SHA256" --arg size "$SIZE" \
+            --arg atomvm_sha "$ATOMVM_SHA" --arg atomgl_sha "$ATOMGL_SHA" \
+            --arg idf_version "$idf_version" --arg stamp "$STAMP" \
+            '{stem: $stem, chip: $chip, features: $features, elixir: ($elixir == "true"),
+              optimization: $optimization, sha256: $sha256, size: ($size | tonumber),
+              atomvm_sha: $atomvm_sha, atomgl_sha: $atomgl_sha, idf_version: $idf_version, stamp: $stamp}' \
+            > "meta/$STEM.json"
+          cat "meta/$STEM.json"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: meta-${{ matrix.stem }}
+          path: meta/
+          if-no-files-found: error
+
+  finalize:
+    needs: [setup, build]
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_ID: ${{ needs.setup.outputs.release_id }}
+      ATOMVM_SHA: ${{ needs.setup.outputs.atomvm_sha }}
+      ATOMGL_SHA: ${{ needs.setup.outputs.atomgl_sha }}
+      BUILD_DATE: ${{ needs.setup.outputs.build_date }}
+      STAMP: ${{ needs.setup.outputs.stamp }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: meta-*
+          path: meta
+          merge-multiple: true
+
+      - name: Check the draft is complete
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?per_page=100" --jq '.[].name' | sort > assets.txt
+          jq -r '.stem + ".zip"' meta/*.json | sort > expected.txt
+          echo "assets on the draft:"; cat assets.txt
+          count=$(wc -l < assets.txt)
+          if [ "$count" != "$EXPECTED_ASSETS" ] || ! cmp -s assets.txt expected.txt; then
+            echo "::error::draft holds $count asset(s), expected $EXPECTED_ASSETS matching the built images; live release left untouched"
+            diff assets.txt expected.txt || true
+            exit 1
+          fi
+
+      - name: Render release notes
+        run: |
+          date_iso="${BUILD_DATE:0:4}-${BUILD_DATE:4:2}-${BUILD_DATE:6:2}"
+          idf_version=$(jq -r '.idf_version' meta/*.json | head -n1)
+          {
+            echo "Rolling nightly build of AtomVM \`$ATOMVM_REF\` for ESP32-family chips, $date_iso."
+            echo
+            echo "- AtomVM: \`$ATOMVM_REF\` @ [\`${ATOMVM_SHA:0:7}\`](https://github.com/$ATOMVM_REPO/commit/$ATOMVM_SHA)"
+            echo "- atomgl: \`$ATOMGL_REF\` @ [\`${ATOMGL_SHA:0:7}\`](https://github.com/$ATOMGL_REPO/commit/$ATOMGL_SHA)"
+            echo "- $idf_version (container \`$IDF_IMAGE\`)"
+            echo "- Build stamp: \`$STAMP\`"
+            echo "- Factory: [\`${GITHUB_SHA:0:7}\`](https://github.com/$GITHUB_REPOSITORY/commit/$GITHUB_SHA), [run $GITHUB_RUN_ID]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)"
+            echo
+            echo "| Image | Optimization | Size | SHA-256 | Status |"
+            echo "|---|---|---|---|---|"
+            jq -r '"| `\(.stem).zip` | \({PERF: "-O2", SIZE: "-Os", DEBUG: "-Og", NONE: "-O0"}[.optimization] // .optimization) | \(.size) | `\(.sha256)` | fresh |"' meta/*.json
+            echo
+            echo "Each bundle contains the image, its checksum, the resolved \`sdkconfig\`, the partition table"
+            echo "and \`FLASH.txt\` with the flash offset and the esptool command."
+          } > notes.md
+          cat notes.md
+
+      - name: Replace the live release
+        run: |
+          if gh release view "$CHANNEL" --json id >/dev/null 2>&1; then
+            echo "deleting live release $CHANNEL and its tag"
+            gh release delete "$CHANNEL" --cleanup-tag --yes
+          fi
+          # a tag left behind without a release would pin the new release to an old commit
+          gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/$CHANNEL" >/dev/null 2>&1 || true
+          date_iso="${BUILD_DATE:0:4}-${BUILD_DATE:4:2}-${BUILD_DATE:6:2}"
+          title="$date_iso — $ATOMVM_REF @ ${ATOMVM_SHA:0:7}"
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+            -f tag_name="$CHANNEL" -f target_commitish="$GITHUB_SHA" \
+            -f name="$title" -F body=@notes.md \
+            -F draft=false -F prerelease=false -f make_latest=true \
+            --jq '"published \(.html_url) on tag \(.tag_name)"'
