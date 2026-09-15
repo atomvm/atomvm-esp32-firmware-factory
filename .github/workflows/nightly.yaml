@@ -271,7 +271,7 @@ jobs:
           epoch=$(date -u -d "$BUILD_DATE" +%s)
           python3 "$GITHUB_WORKSPACE/factory/scripts/make_bundle.py" \
             --stem "$STEM" --chip "$CHIP" --img "build/$STEM.img" --sdkconfig sdkconfig \
-            --partitions-dir . --flasher-args build/flasher_args.json \
+            --partitions-dir . --build-dir build \
             --source-date-epoch "$epoch" --out "$GITHUB_WORKSPACE/dist"
           escript "$GITHUB_WORKSPACE/factory/scripts/verify_bundle.escript" "$GITHUB_WORKSPACE/dist/$STEM.zip" "$STEM"
           unzip -l "$GITHUB_WORKSPACE/dist/$STEM.zip"
@@ -393,8 +393,9 @@ jobs:
             echo "|---|---|---|---|---|"
             jq -r '"| `\(.stem).zip` | \({PERF: "-O2", SIZE: "-Os", DEBUG: "-Og", NONE: "-O0"}[.optimization] // .optimization) | \(.size) | `\(.sha256)` | fresh |"' meta/*.json
             echo
-            echo "Each bundle contains the image, its checksum, the resolved \`sdkconfig\`, the partition table"
-            echo "and \`FLASH.txt\` with the flash offset and the esptool command."
+            echo "Each bundle contains the image, the resolved \`sdkconfig\` and partition table, the image's parts"
+            echo "as separate binaries, SHA-256 checksums, and \`FLASH.txt\` with the esptool commands to install the"
+            echo "image or to update an existing AtomVM installation without erasing NVS or \`main.avm\`."
           } > notes.md
           cat notes.md
 

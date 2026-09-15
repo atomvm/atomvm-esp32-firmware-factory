@@ -41,12 +41,18 @@ main.avm, data, phy,     0x250000,   0x100000
 """
 
 SDKCONFIG = (
+    "#\n"
+    "# Automatically generated file. DO NOT EDIT.\n"
+    "# Espressif IoT Development Framework (ESP-IDF) 5.5.4 Project Configuration\n"
+    "#\n"
     'CONFIG_IDF_TARGET="esp32s3"\n'
+    'CONFIG_APP_PROJECT_VER="nightly-0.7+20260915.02e1603"\n'
     'CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"\n'
     "CONFIG_SPIRAM=y\n"
 )
 
 STEM = "AtomVM-esp32s3-atomgl-ipv6-libsodium-psram-nightly-0.7"
+ELIXIR_STEM = "AtomVM-esp32s3-atomgl-ipv6-libsodium-psram-elixir-nightly-0.7"
 FULL_PROFILE_FRAGMENTS = ("ipv6", "libsodium", "psram")
 
 
@@ -132,37 +138,108 @@ class ApplyFragmentsTest(unittest.TestCase):
             self.assertEqual(template.read_text(), TEMPLATE)
 
 
+BOOTLOADER = b"\xe9" + bytes(range(1, 256)) * 77
+PARTITION_TABLE = bytes(range(256)) * 12
+APP = b"\xe9\x06\x02\x2f" + bytes(range(256)) * 400
+BOOT_LIBRARY = b"#!/usr/bin/env AtomVM\n\0\0" + bytes(range(255, -1, -1)) * 300
+PARTS = ("bootloader.bin", "partition-table.bin", "atomvm-esp32.bin", "esp32boot.avm")
+ENTRIES = ("bootloader", "partition-table", "app", "boot.avm")
+
+
+def flip_byte(data, index):
+    return data[:index] + bytes([data[index] ^ 0xFF]) + data[index + 1:]
+
+
+def mkimage(parts, base=0):
+    """Concatenate (offset, data) parts with 0xFF gaps, as AtomVM's mkimage does."""
+    image = bytearray()
+    for offset, data in sorted(parts):
+        image += b"\xff" * (offset - base - len(image))
+        image += data
+    return bytes(image)
+
+
 class BundleTestCase(unittest.TestCase):
-    """Shared bundle fixture; holds no tests itself."""
+    """Fake ESP-IDF build tree laid out like CI's; holds no tests itself."""
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp)
-        self.img = self.tmp / f"{STEM}.img"
-        self.img.write_bytes(bytes(range(256)) * 64 + b"\xff" * 4096)
-        (self.tmp / "sdkconfig").write_text(SDKCONFIG)
-        (self.tmp / "partitions.csv").write_text(PARTITIONS)
-        self.flasher = self.tmp / "flasher_args.json"
-        self.flasher.write_text(json.dumps({
-            "bootloader": {"offset": "0x0"},
+        self.esp32_dir = self.tmp / "AtomVM" / "src" / "platforms" / "esp32"
+        self.build_dir = self.esp32_dir / "build"
+        self.libs_dir = self.tmp / "AtomVM" / "build" / "libs" / "esp32boot"
+        for directory in (self.build_dir / "bootloader", self.build_dir / "partition_table", self.libs_dir):
+            directory.mkdir(parents=True)
+        (self.esp32_dir / "sdkconfig").write_text(SDKCONFIG)
+        (self.esp32_dir / "partitions.csv").write_text(PARTITIONS)
+        (self.build_dir / "bootloader" / "bootloader.bin").write_bytes(BOOTLOADER)
+        (self.build_dir / "partition_table" / "partition-table.bin").write_bytes(PARTITION_TABLE)
+        (self.build_dir / "atomvm-esp32.bin").write_bytes(APP)
+        (self.libs_dir / "esp32boot.avm").write_bytes(BOOT_LIBRARY)
+        self.flasher_args = {
+            "write_flash_args": ["--flash_mode", "dio", "--flash_size", "4MB", "--flash_freq", "80m"],
             "flash_settings": {"flash_mode": "dio", "flash_size": "4MB", "flash_freq": "80m"},
-        }))
+            "flash_files": {"0x0": "bootloader/bootloader.bin", "0x10000": "atomvm-esp32.bin",
+                            "0x8000": "partition_table/partition-table.bin",
+                            "0x1d0000": "../../../../build/libs/esp32boot/esp32boot.avm"},
+            "bootloader": {"offset": "0x0", "file": "bootloader/bootloader.bin", "encrypted": "false"},
+            "app": {"offset": "0x10000", "file": "atomvm-esp32.bin", "encrypted": "false"},
+            "partition-table": {"offset": "0x8000", "file": "partition_table/partition-table.bin",
+                                "encrypted": "false"},
+            "boot.avm": {"offset": "0x1d0000", "file": "../../../../build/libs/esp32boot/esp32boot.avm",
+                         "encrypted": "false"},
+            "extra_esptool_args": {"after": "hard_reset", "before": "default_reset", "stub": True,
+                                   "chip": "esp32s3"},
+        }
+        self.img = self.build_dir / f"{STEM}.img"
+        self.save_flasher_args()
+        self.rebuild_image()
+
+    def save_flasher_args(self):
+        (self.build_dir / "flasher_args.json").write_text(json.dumps(self.flasher_args, indent=4))
+
+    def part_path(self, entry):
+        return self.build_dir / self.flasher_args[entry]["file"]
+
+    def rebuild_image(self):
+        self.img.write_bytes(mkimage([(int(self.flasher_args[entry]["offset"], 16),
+                                       self.part_path(entry).read_bytes()) for entry in ENTRIES]))
+
+    def use_boot_library(self, name):
+        (self.libs_dir / name).write_bytes(BOOT_LIBRARY)
+        self.flasher_args["boot.avm"]["file"] = f"../../../../build/libs/esp32boot/{name}"
+        self.save_flasher_args()
+        self.rebuild_image()
 
     def bundle(self, **overrides):
-        args = dict(stem=STEM, chip="esp32s3", img_path=self.img,
-                    sdkconfig_path=self.tmp / "sdkconfig", partitions_dir=self.tmp,
-                    out_dir=self.tmp / "dist", epoch=1789430400,
-                    flasher_args_path=self.flasher)
+        args = dict(stem=STEM, chip="esp32s3", img_path=self.img, sdkconfig_path=self.esp32_dir / "sdkconfig",
+                    partitions_dir=self.esp32_dir, build_dir=self.build_dir, out_dir=self.tmp / "dist",
+                    epoch=1789430400)
         args.update(overrides)
         return make_bundle.build_bundle(**args)
+
+    def flash_txt(self, **overrides):
+        out, _, _ = self.bundle(**overrides)
+        with zipfile.ZipFile(out) as bundle:
+            return bundle.read("FLASH.txt").decode()
+
+    def rewrite_zip(self, src, transform, compression=zipfile.ZIP_DEFLATED):
+        """Copy a zip, passing each member through transform(name, data); None drops it."""
+        dst = self.tmp / "rewritten.zip"
+        with zipfile.ZipFile(src) as zin, zipfile.ZipFile(dst, "w", compression) as zout:
+            for name in zin.namelist():
+                data = transform(name, zin.read(name))
+                if data is not None:
+                    zout.writestr(name, data)
+        return dst
 
 
 class MakeBundleTest(BundleTestCase):
     def test_members_in_order_and_checksum(self):
         out, img_sha, _ = self.bundle()
         with zipfile.ZipFile(out) as bundle:
-            self.assertEqual(bundle.namelist(),
-                             [f"{STEM}.img", f"{STEM}.img.sha256", "sdkconfig", "partitions.csv", "FLASH.txt"])
+            self.assertEqual(bundle.namelist(), [f"{STEM}.img", f"{STEM}.img.sha256", "sdkconfig",
+                                                 "partitions.csv", "FLASH.txt", *PARTS, "SHA256SUMS"])
             for info in bundle.infolist():
                 self.assertEqual(info.compress_type, zipfile.ZIP_DEFLATED)
                 self.assertEqual(info.extra, b"")
@@ -171,6 +248,12 @@ class MakeBundleTest(BundleTestCase):
             self.assertEqual(bundle.read(f"{STEM}.img.sha256").decode(), f"{img_sha}  {STEM}.img\n")
             self.assertEqual(bundle.read("sdkconfig").decode(), SDKCONFIG)
             self.assertEqual(bundle.read("partitions.csv").decode(), PARTITIONS)
+            for name, entry in zip(PARTS, ENTRIES):
+                self.assertEqual(bundle.read(name), self.part_path(entry).read_bytes())
+            summed = [f"{STEM}.img", "sdkconfig", "partitions.csv", "FLASH.txt", *PARTS]
+            self.assertEqual(bundle.read("SHA256SUMS").decode(),
+                             "".join(f"{hashlib.sha256(bundle.read(name)).hexdigest()}  {name}\n"
+                                     for name in summed))
             flash = bundle.read("FLASH.txt").decode()
         self.assertEqual(img_sha, hashlib.sha256(self.img.read_bytes()).hexdigest())
         self.assertIn("Chip: esp32s3\n", flash)
@@ -179,6 +262,7 @@ class MakeBundleTest(BundleTestCase):
         self.assertIn("--flash_mode dio --flash_freq 80m --flash_size detect", flash)
         self.assertIn(f"    0x0 {STEM}.img\n", flash)
         self.assertIn("erases the NVS partition", flash)
+        self.assertIn("sha256sum -c SHA256SUMS", flash)
 
     def test_deterministic(self):
         out1, _, sha1 = self.bundle()
@@ -188,13 +272,55 @@ class MakeBundleTest(BundleTestCase):
         self.assertEqual(sha1, hashlib.sha256(out1.read_bytes()).hexdigest())
 
     def test_partition_csv_follows_sdkconfig(self):
-        (self.tmp / "sdkconfig").write_text(
+        (self.esp32_dir / "sdkconfig").write_text(
             SDKCONFIG.replace('"partitions.csv"', '"partitions-elixir.csv"'))
-        (self.tmp / "partitions-elixir.csv").write_text(PARTITIONS.replace("0x250000", "0x300000"))
+        (self.esp32_dir / "partitions-elixir.csv").write_text(PARTITIONS.replace("0x250000", "0x300000"))
         out, _, _ = self.bundle()
         with zipfile.ZipFile(out) as bundle:
             self.assertIn("0x300000", bundle.read("partitions.csv").decode())
             self.assertIn("Application partition (main.avm): 0x300000\n", bundle.read("FLASH.txt").decode())
+
+    def test_flash_txt_install(self):
+        flash = self.flash_txt()
+        self.assertIn("AtomVM build: nightly-0.7+20260915.02e1603\n", flash)
+        self.assertIn("ESP-IDF: 5.5.4\n", flash)
+        self.assertIn("  esptool.py --chip esp32s3 --port /dev/ttyUSB0 --baud 921600 erase_flash\n", flash)
+        self.assertIn("    --flash_mode dio --flash_freq 80m --flash_size detect \\\n"
+                      f"    0x0 {STEM}.img\n", flash)
+        self.assertIn("erases the NVS partition", flash)
+
+    def test_flash_txt_update(self):
+        flash = self.flash_txt()
+        self.assertIn(
+            "  esptool.py --chip esp32s3 --port /dev/ttyUSB0 --baud 921600 --after no_reset \\\n"
+            "    verify_flash 0x8000 partition-table.bin && \\\n"
+            "  esptool.py --chip esp32s3 --port /dev/ttyUSB0 --baud 921600 \\\n"
+            "    --before default_reset --after hard_reset write_flash \\\n"
+            "    0x10000 atomvm-esp32.bin 0x1d0000 esp32boot.avm\n", flash)
+        self.assertIn("newer ESP-IDF than this\n  image (5.5.4)", flash)
+        self.assertIn('"boot: ESP-IDF v5.5.4 2nd stage bootloader"', flash)
+        self.assertIn("  0x0       bootloader.bin\n  0x8000    partition-table.bin\n"
+                      "  0x10000   atomvm-esp32.bin\n  0x1d0000  esp32boot.avm\n", flash)
+
+    def test_flash_txt_follows_layout_and_flavor(self):
+        self.flasher_args["boot.avm"]["offset"] = "0x180000"
+        self.use_boot_library("elixir_esp32boot.avm")
+        flash = self.flash_txt(stem=ELIXIR_STEM)
+        self.assertIn("    0x10000 atomvm-esp32.bin 0x180000 elixir_esp32boot.avm\n", flash)
+        self.assertIn("  0x180000  elixir_esp32boot.avm\n", flash)
+
+    def test_unknown_stamp_and_idf_version(self):
+        (self.esp32_dir / "sdkconfig").write_text('CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"\n')
+        flash = self.flash_txt()
+        self.assertIn("AtomVM build: unknown\n", flash)
+        self.assertIn("ESP-IDF: unknown\n", flash)
+
+    def test_boot_library_keeps_its_name(self):
+        self.use_boot_library("elixir_esp32boot.avm")
+        out, _, _ = self.bundle(stem=ELIXIR_STEM)
+        with zipfile.ZipFile(out) as bundle:
+            self.assertIn("elixir_esp32boot.avm", bundle.namelist())
+            self.assertNotIn("esp32boot.avm", bundle.namelist())
 
     def test_offset_table(self):
         self.assertEqual(make_bundle.FLASH_OFFSETS["esp32"], 0x1000)
@@ -204,22 +330,66 @@ class MakeBundleTest(BundleTestCase):
         self.assertEqual(len(make_bundle.FLASH_OFFSETS), 10)
         with self.assertRaises(ValueError):
             self.bundle(chip="esp8266")
-
-    def test_flasher_args_offset_mismatch(self):
-        self.flasher.write_text(json.dumps({"bootloader": {"offset": "0x1000"}}))
-        with self.assertRaises(ValueError):
+        self.flasher_args["bootloader"]["offset"] = "0x1000"
+        self.save_flasher_args()
+        with self.assertRaisesRegex(make_bundle.BundleError, "table value 0x0"):
             self.bundle()
 
+    def test_rejects_flash_entry_changes(self):
+        cases = [
+            ("phy entry", lambda a: a.update(phy={"offset": "0xf000", "file": "phy_init_data.bin"}),
+             "unexpected flash entries phy; the bundle covers bootloader, partition-table, app, boot.avm"),
+            ("nvs entry", lambda a: a.update(nvs={"offset": "0x9000", "file": "nvs.bin"}),
+             "unexpected flash entries nvs"),
+            ("missing entry", lambda a: a.pop("boot.avm"), "missing flash entries boot.avm"),
+            ("missing file", lambda a: a["boot.avm"].update(file="missing/esp32boot.avm"),
+             "boot.avm file .*/missing/esp32boot.avm not found"),
+        ]
+        original = json.dumps(self.flasher_args)
+        for label, change, pattern in cases:
+            with self.subTest(label):
+                self.flasher_args = json.loads(original)
+                change(self.flasher_args)
+                self.save_flasher_args()
+                with self.assertRaisesRegex(make_bundle.BundleError, pattern):
+                    self.bundle()
+
+    def test_rejects_part_missing_from_image(self):
+        image = self.img.read_bytes()
+        for label, index, pattern in (("app", 0x10000 + 5, "atomvm-esp32.bin differs from the image at 0x10000"),
+                                      ("boot", 0x1d0000 + 30, "esp32boot.avm differs from the image at 0x1d0000")):
+            with self.subTest(label):
+                self.img.write_bytes(flip_byte(image, index))
+                with self.assertRaisesRegex(make_bundle.BundleError, pattern):
+                    self.bundle()
+
+    def run_cli(self, build_dir=True):
+        args = [sys.executable, str(SCRIPTS / "make_bundle.py"), "--stem", STEM, "--chip", "esp32s3",
+                "--img", str(self.img), "--sdkconfig", str(self.esp32_dir / "sdkconfig"),
+                "--partitions-dir", str(self.esp32_dir), "--out", str(self.tmp / "dist"),
+                "--source-date-epoch", "1789430400"]
+        if build_dir:
+            args += ["--build-dir", str(self.build_dir)]
+        return subprocess.run(args, capture_output=True, text=True, cwd=self.tmp)
+
     def test_cli(self):
-        proc = subprocess.run(
-            [sys.executable, str(SCRIPTS / "make_bundle.py"), "--stem", STEM, "--chip", "esp32s3",
-             "--img", str(self.img), "--sdkconfig", str(self.tmp / "sdkconfig"),
-             "--partitions-dir", str(self.tmp), "--out", str(self.tmp / "dist"),
-             "--flasher-args", str(self.flasher), "--source-date-epoch", "1789430400"],
-            capture_output=True, text=True)
+        proc = self.run_cli()
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertTrue((self.tmp / "dist" / f"{STEM}.zip").exists())
         self.assertIn(f"  {STEM}.img\n", proc.stdout)
+
+    def test_cli_requires_build_dir(self):
+        proc = self.run_cli(build_dir=False)
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("--build-dir", proc.stderr)
+
+    def test_cli_reports_bundle_error(self):
+        self.flasher_args["phy"] = {"offset": "0xf000", "file": "phy_init_data.bin"}
+        self.save_flasher_args()
+        proc = self.run_cli()
+        self.assertEqual(proc.returncode, 1)
+        self.assertTrue(proc.stderr.startswith("make_bundle: "), proc.stderr)
+        self.assertIn("unexpected flash entries phy", proc.stderr)
 
 
 @unittest.skipUnless(shutil.which("escript"), "escript not available")
@@ -235,25 +405,44 @@ class VerifyBundleTest(BundleTestCase):
         proc = self.verify(out)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn(img_sha, proc.stdout)
+        for entry in ENTRIES:
+            self.assertIn(hashlib.sha256(self.part_path(entry).read_bytes()).hexdigest(), proc.stdout)
+
+    def test_accepts_elixir_bundle(self):
+        self.use_boot_library("elixir_esp32boot.avm")
+        out, _, _ = self.bundle(stem=ELIXIR_STEM)
+        proc = self.verify(out, ELIXIR_STEM)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
 
     def test_rejects_wrong_members(self):
         out, _, _ = self.bundle()
-        proc = self.verify(out, "AtomVM-esp32-nightly-0.7")
+        for stem in ("AtomVM-esp32-nightly-0.7", ELIXIR_STEM):
+            with self.subTest(stem):
+                proc = self.verify(out, stem)
+                self.assertEqual(proc.returncode, 1)
+                self.assertIn("members", proc.stderr)
+        dropped = self.rewrite_zip(out, lambda name, data: None if name == "esp32boot.avm" else data)
+        proc = self.verify(dropped)
         self.assertEqual(proc.returncode, 1)
         self.assertIn("members", proc.stderr)
 
-    def test_rejects_tampered_image(self):
+    def test_rejects_tampered_members(self):
         out, _, _ = self.bundle()
-        tampered = self.tmp / "tampered.zip"
-        with zipfile.ZipFile(out) as src, zipfile.ZipFile(tampered, "w", zipfile.ZIP_DEFLATED) as dst:
-            for name in src.namelist():
-                data = src.read(name)
-                if name.endswith(".img"):
-                    data = data[:-1] + b"\x00"
-                dst.writestr(name, data)
-        proc = self.verify(tampered)
+        for member in (f"{STEM}.img", "atomvm-esp32.bin", "FLASH.txt"):
+            with self.subTest(member):
+                tampered = self.rewrite_zip(
+                    out, lambda name, data: flip_byte(data, len(data) // 2) if name == member else data)
+                proc = self.verify(tampered)
+                self.assertEqual(proc.returncode, 1)
+                self.assertIn("sha256_mismatch", proc.stderr)
+
+    def test_rejects_sha256sums_listing(self):
+        out, _, _ = self.bundle()
+        shortened = self.rewrite_zip(
+            out, lambda name, data: b"".join(data.splitlines(True)[:-1]) if name == "SHA256SUMS" else data)
+        proc = self.verify(shortened)
         self.assertEqual(proc.returncode, 1)
-        self.assertIn("sha256_mismatch", proc.stderr)
+        self.assertIn("sha256_names", proc.stderr)
 
     def test_rejects_unsupported_compression(self):
         try:
@@ -261,10 +450,7 @@ class VerifyBundleTest(BundleTestCase):
         except ImportError:
             self.skipTest("lzma not available")
         out, _, _ = self.bundle()
-        lzma_zip = self.tmp / "lzma.zip"
-        with zipfile.ZipFile(out) as src, zipfile.ZipFile(lzma_zip, "w", zipfile.ZIP_LZMA) as dst:
-            for name in src.namelist():
-                dst.writestr(name, src.read(name))
+        lzma_zip = self.rewrite_zip(out, lambda name, data: data, zipfile.ZIP_LZMA)
         proc = self.verify(lzma_zip)
         self.assertEqual(proc.returncode, 1)
         self.assertIn("unzip", proc.stderr)

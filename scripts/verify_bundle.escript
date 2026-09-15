@@ -5,7 +5,8 @@
 %% Verify an AtomVM firmware bundle before it is uploaded:
 %%   - it opens with zip:unzip/2 in memory (so it uses DEFLATE or STORE only),
 %%   - it contains exactly the expected members,
-%%   - <stem>.img.sha256 matches <stem>.img.
+%%   - <stem>.img.sha256 and SHA256SUMS list the expected names, and every
+%%     listed digest matches its member.
 %%
 %% usage: verify_bundle.escript <bundle.zip> <stem>
 
@@ -34,29 +35,54 @@ verify(Zip, Stem) ->
 
 check_members(Members, Stem) ->
     Img = Stem ++ ".img",
-    Sha = Stem ++ ".img.sha256",
-    Expected = [Img, Sha, "sdkconfig", "partitions.csv", "FLASH.txt"],
+    Parts = ["bootloader.bin", "partition-table.bin", "atomvm-esp32.bin", boot_library(Stem)],
+    Summed = [Img, "sdkconfig", "partitions.csv", "FLASH.txt" | Parts],
+    Expected = [Img, Img ++ ".sha256", "sdkconfig", "partitions.csv", "FLASH.txt"] ++ Parts ++ ["SHA256SUMS"],
     Names = [Name || {Name, _} <- Members],
     case lists:sort(Names) =:= lists:sort(Expected) of
         false ->
             {error, {members, Names, Expected}};
         true ->
-            {_, ImgBin} = lists:keyfind(Img, 1, Members),
-            {_, ShaBin} = lists:keyfind(Sha, 1, Members),
-            check_sha256(Img, ImgBin, ShaBin)
+            case check_sums(Img ++ ".sha256", [Img], Members) of
+                ok -> check_sums("SHA256SUMS", Summed, Members);
+                Error -> Error
+            end
     end.
 
-check_sha256(Img, ImgBin, ShaBin) ->
-    Digest = binary:encode_hex(crypto:hash(sha256, ImgBin), lowercase),
-    ImgName = list_to_binary(Img),
-    case binary:split(ShaBin, [<<" ">>, <<"\n">>], [global, trim_all]) of
-        [Digest, ImgName] ->
-            io:format("~s: ~B bytes, sha256 ~s~n", [Img, byte_size(ImgBin), Digest]),
-            ok;
-        [Digest, OtherName] ->
-            {error, {sha256_name, OtherName, ImgName}};
-        [Hex, _Name] ->
-            {error, {sha256_mismatch, Hex, Digest}};
-        Other ->
-            {error, {sha256_file, Other}}
+boot_library(Stem) ->
+    case string:find(Stem, "-elixir-") of
+        nomatch -> "esp32boot.avm";
+        _ -> "elixir_esp32boot.avm"
+    end.
+
+check_sums(SumsName, Names, Members) ->
+    {_, Sums} = lists:keyfind(SumsName, 1, Members),
+    case parse_sums(binary:split(Sums, <<"\n">>, [global, trim_all]), []) of
+        {ok, Listed} ->
+            case [binary_to_list(Name) || {_, Name} <- Listed] of
+                Names -> check_digests(Listed, Members);
+                ListedNames -> {error, {sha256_names, SumsName, ListedNames, Names}}
+            end;
+        Error ->
+            Error
+    end.
+
+parse_sums([], Acc) ->
+    {ok, lists:reverse(Acc)};
+parse_sums([<<Hex:64/binary, "  ", Name/binary>> | Rest], Acc) ->
+    parse_sums(Rest, [{Hex, Name} | Acc]);
+parse_sums([Line | _], _Acc) ->
+    {error, {sha256_file, Line}}.
+
+check_digests([], _Members) ->
+    ok;
+check_digests([{Hex, Name} | Rest], Members) ->
+    Path = binary_to_list(Name),
+    {_, Data} = lists:keyfind(Path, 1, Members),
+    case binary:encode_hex(crypto:hash(sha256, Data), lowercase) of
+        Hex ->
+            io:format("~s: ~B bytes, sha256 ~s~n", [Path, byte_size(Data), Hex]),
+            check_digests(Rest, Members);
+        Digest ->
+            {error, {sha256_mismatch, Path, Hex, Digest}}
     end.
