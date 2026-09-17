@@ -25,7 +25,7 @@ env:
   ATOMGL_REPO: atomvm/atomgl
   ATOMGL_REF: main
   IDF_IMAGE: espressif/idf:v5.5.4
-  EXPECTED_ASSETS: "1"
+  EXPECTED_ASSETS: "2"
 
 jobs:
   setup:
@@ -103,6 +103,10 @@ jobs:
             features: atomgl ipv6 libsodium psram
             elixir: false
             stem: AtomVM-esp32s3-atomgl-ipv6-libsodium-psram-nightly-0.7
+          - chip: esp32s3
+            features: atomgl ipv6 libsodium psram
+            elixir: true
+            stem: AtomVM-esp32s3-atomgl-ipv6-libsodium-psram-elixir-nightly-0.7
     env:
       # as upstream esp32-mkimage.yaml: host compiler for the libs build,
       # ImageOS lets erlef/setup-beam run inside the container
