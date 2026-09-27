@@ -20,6 +20,7 @@ sys.path.insert(0, str(SCRIPTS))
 
 import apply_fragments  # noqa: E402
 import make_bundle  # noqa: E402
+import select_tag  # noqa: E402
 
 # Upstream sdkconfig.release-defaults.in as of release-0.7.
 TEMPLATE = """CONFIG_PARTITION_TABLE_CUSTOM=y
@@ -483,6 +484,61 @@ class VerifyBundleTest(BundleTestCase):
         proc = self.verify(lzma_zip)
         self.assertEqual(proc.returncode, 1)
         self.assertIn("unzip", proc.stderr)
+
+
+class SelectTagTest(unittest.TestCase):
+    FLOOR = "v0.7.0-beta.0"
+    # upstream tags as of 2026-09-27, plus some older ones
+    UPSTREAM = ["v0.6.5", "v0.6.6", "v0.7.0-alpha.0", "v0.7.0-alpha.1"]
+
+    def select(self, upstream, published=()):
+        return select_tag.select(self.FLOOR, upstream, published)
+
+    def test_floor_excludes_older_tags(self):
+        self.assertIsNone(self.select(self.UPSTREAM))
+        self.assertEqual(self.select(self.UPSTREAM + ["v0.7.0-beta.0"]), "v0.7.0-beta.0")
+
+    def test_oldest_pending_tag_by_precedence(self):
+        ordered = ["v0.7.0-beta.0", "v0.7.0-beta.1", "v0.7.0-rc.9", "v0.7.0-rc.10",
+                   "v0.7.0", "v0.7.1", "v0.8.0-alpha.0"]
+        for i, tag in enumerate(ordered):
+            upstream = self.UPSTREAM + list(reversed(ordered))
+            self.assertEqual(self.select(upstream, ordered[:i]), tag)
+        self.assertIsNone(self.select(self.UPSTREAM + ordered, ordered))
+
+    def test_precedence_rules(self):
+        key = select_tag.version_key
+        self.assertLess(key("v0.7.0-rc.1"), key("v0.7.0"))
+        self.assertLess(key("v0.7.0-rc.9"), key("v0.7.0-rc.10"))
+        self.assertLess(key("v0.7.0-rc.1"), key("v0.7.0-rc.1.1"))
+        self.assertLess(key("v0.7.0-1"), key("v0.7.0-alpha"))
+        self.assertLess(key("v0.9.0"), key("v0.10.0"))
+
+    def test_ignores_other_tags(self):
+        for tag in ["nightly-0.7", "0.7.0", "v0.7", "v0.7.0+build.1", "v0.7.00", "v0.7.0-"]:
+            self.assertIsNone(select_tag.version_key(tag), tag)
+            self.assertIsNone(self.select([tag]))
+
+    def test_cli(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            upstream = Path(tmp, "upstream")
+            published = Path(tmp, "published")
+            upstream.write_text("v0.7.0-alpha.1\nv0.7.0-beta.1\nv0.7.0-beta.0\n")
+            published.write_text("nightly-0.7\nv0.7.0-beta.0\n")
+
+            def run(*args):
+                return subprocess.run(
+                    [sys.executable, str(SCRIPTS / "select_tag.py"), *args],
+                    capture_output=True, text=True)
+
+            proc = run(self.FLOOR, str(upstream), str(published))
+            self.assertEqual((proc.returncode, proc.stdout), (0, "v0.7.0-beta.1\n"))
+            published.write_text("v0.7.0-beta.1\nv0.7.0-beta.0\n")
+            proc = run(self.FLOOR, str(upstream), str(published))
+            self.assertEqual((proc.returncode, proc.stdout), (0, ""))
+            proc = run("beta", str(upstream), str(published))
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn("select_tag: floor is not a version tag", proc.stderr)
 
 
 if __name__ == "__main__":
