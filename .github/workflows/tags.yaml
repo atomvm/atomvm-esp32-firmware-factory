@@ -1,0 +1,209 @@
+# Build the images for AtomVM release tags. Every night, the oldest upstream
+# tag from FIRST_TAG on that has no release here yet is built and published
+# once, as a release on the same tag name. A tag that fails to build stays
+# pending and is retried the next night. A manual run can name any upstream
+# tag without a release, also one older than FIRST_TAG.
+
+name: release-tags
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "AtomVM tag to build (default: the oldest pending one)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: release-tags
+  cancel-in-progress: false
+
+env:
+  FIRST_TAG: v0.7.0-beta.0
+  ATOMVM_REPO: atomvm/AtomVM
+  ATOMGL_REPO: atomvm/atomgl
+  ATOMGL_REF: main
+  IDF_IMAGE: espressif/idf:v5.5.4
+
+jobs:
+  setup:
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      release_id: ${{ steps.draft.outputs.release_id }}
+      atomvm_sha: ${{ steps.refs.outputs.atomvm_sha }}
+      atomgl_sha: ${{ steps.refs.outputs.atomgl_sha }}
+      build_date: ${{ steps.refs.outputs.build_date }}
+      stamp: ${{ steps.refs.outputs.stamp }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run factory unit tests
+        run: python3 -m unittest discover -s tests -v
+
+      - name: Choose the tag
+        id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/$ATOMVM_REPO/git/matching-refs/tags/v" \
+            --jq '.[].ref | ltrimstr("refs/tags/")' > upstream.txt
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases" \
+            --jq '.[] | select(.draft | not) | .tag_name' > published.txt
+          if [ -n "$REQUESTED_TAG" ]; then
+            if ! grep -qxF -- "$REQUESTED_TAG" upstream.txt; then
+              echo "::error::$REQUESTED_TAG is not a tag of $ATOMVM_REPO"
+              exit 1
+            fi
+            if grep -qxF -- "$REQUESTED_TAG" published.txt; then
+              echo "::error::$REQUESTED_TAG already has a release here; delete it first to rebuild"
+              exit 1
+            fi
+            tag=$REQUESTED_TAG
+          else
+            tag=$(python3 scripts/select_tag.py "$FIRST_TAG" upstream.txt published.txt)
+          fi
+          if [ -z "$tag" ]; then
+            echo "no pending tag from $FIRST_TAG on"
+          else
+            echo "building $tag"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve upstream commits
+        id: refs
+        if: steps.tag.outputs.tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          atomvm_sha=$(gh api "repos/$ATOMVM_REPO/commits/$TAG" --jq .sha)
+          atomgl_sha=$(gh api "repos/$ATOMGL_REPO/commits/$ATOMGL_REF" --jq .sha)
+          build_date=$(date -u +%Y%m%d)
+          stamp="$TAG+$build_date.${atomvm_sha:0:7}"
+          {
+            echo "atomvm_sha=$atomvm_sha"
+            echo "atomgl_sha=$atomgl_sha"
+            echo "build_date=$build_date"
+            echo "stamp=$stamp"
+          } >> "$GITHUB_OUTPUT"
+          echo "AtomVM $TAG @ $atomvm_sha, atomgl $ATOMGL_REF @ $atomgl_sha, stamp $stamp"
+
+      # tag-staging-* drafts are not matched by the nightly's staging-* cleanup
+      - name: Delete stale staging drafts of other runs
+        if: steps.tag.outputs.tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases" \
+            --jq ".[] | select(.draft and (.tag_name | startswith(\"tag-staging-\")) and .tag_name != \"tag-staging-$GITHUB_RUN_ID\") | .id" \
+          | while read -r id; do
+              echo "deleting stale draft $id"
+              gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/$id"
+            done
+
+      - name: Create the draft release
+        id: draft
+        if: steps.tag.outputs.tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          staging="tag-staging-$GITHUB_RUN_ID"
+          # reuse the draft of this run when jobs are re-run
+          id=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" \
+                 --jq ".[] | select(.draft and .tag_name == \"$staging\") | .id" | head -n1)
+          if [ -z "$id" ]; then
+            id=$(gh api -X POST "repos/$GITHUB_REPOSITORY/releases" \
+                   -f tag_name="$staging" -f target_commitish="$GITHUB_SHA" \
+                   -f name="$TAG staging (run $GITHUB_RUN_ID)" \
+                   -F draft=true -F prerelease=false --jq .id)
+          fi
+          echo "release_id=$id" >> "$GITHUB_OUTPUT"
+          echo "draft release $id ($staging)"
+
+  build:
+    needs: setup
+    if: needs.setup.outputs.tag != ''
+    uses: ./.github/workflows/build.yaml
+    with:
+      version: ${{ needs.setup.outputs.tag }}
+      atomvm_sha: ${{ needs.setup.outputs.atomvm_sha }}
+      atomgl_sha: ${{ needs.setup.outputs.atomgl_sha }}
+      build_date: ${{ needs.setup.outputs.build_date }}
+      stamp: ${{ needs.setup.outputs.stamp }}
+      release_id: ${{ needs.setup.outputs.release_id }}
+
+  publish:
+    needs: [setup, build]
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.setup.outputs.tag }}
+      RELEASE_ID: ${{ needs.setup.outputs.release_id }}
+      ATOMVM_SHA: ${{ needs.setup.outputs.atomvm_sha }}
+      ATOMGL_SHA: ${{ needs.setup.outputs.atomgl_sha }}
+      BUILD_DATE: ${{ needs.setup.outputs.build_date }}
+      STAMP: ${{ needs.setup.outputs.stamp }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: meta-*
+          path: meta
+          merge-multiple: true
+
+      - name: Render release notes
+        run: |
+          date_iso="${BUILD_DATE:0:4}-${BUILD_DATE:4:2}-${BUILD_DATE:6:2}"
+          idf_version=$(jq -r '.idf_version' meta/*.json | head -n1)
+          {
+            echo "Firmware for AtomVM \`$TAG\` for ESP32-family chips, built $date_iso."
+            echo
+            echo "- AtomVM: [\`$TAG\`](https://github.com/$ATOMVM_REPO/releases/tag/$TAG) @ [\`${ATOMVM_SHA:0:7}\`](https://github.com/$ATOMVM_REPO/commit/$ATOMVM_SHA)"
+            echo "- atomgl: \`$ATOMGL_REF\` @ [\`${ATOMGL_SHA:0:7}\`](https://github.com/$ATOMGL_REPO/commit/$ATOMGL_SHA)"
+            echo "- $idf_version (container \`$IDF_IMAGE\`)"
+            echo "- Build stamp: \`$STAMP\`"
+            echo "- Factory: [\`${GITHUB_SHA:0:7}\`](https://github.com/$GITHUB_REPOSITORY/commit/$GITHUB_SHA), [run $GITHUB_RUN_ID]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)"
+            echo
+            echo "| Image | Optimization | Size | SHA-256 | ELF SHA-256 |"
+            echo "|---|---|---|---|---|"
+            jq -r '"| `\(.stem).zip` | \({PERF: "-O2", SIZE: "-Os", DEBUG: "-Og", NONE: "-O0"}[.optimization] // .optimization) | \(.size) | `\(.sha256)` | `\(.elf_sha256[0:9])` |"' meta/*.json
+            echo
+            echo "Each bundle contains the image, the resolved \`sdkconfig\` and partition table, the image's parts"
+            echo "as separate binaries, the ELF and map files, SHA-256 checksums, and \`FLASH.txt\` with the esptool"
+            echo "commands to install the image or to update an existing AtomVM installation without erasing NVS or"
+            echo "\`main.avm\`, and with how to decode crashes. The ELF SHA-256 column shows the prefix a board prints"
+            echo "at boot and on panics, to match a crash log to its bundle. Upstream AtomVM publishes the images"
+            echo "without features for the same tag."
+          } > notes.md
+          cat notes.md
+
+      - name: Publish the release
+        run: |
+          set -euo pipefail
+          # A tagged release is published once and never replaced.
+          tag=$(gh api --paginate "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$TAG" \
+            --jq ".[] | select(.ref == \"refs/tags/$TAG\") | .ref")
+          if [ -n "$tag" ]; then
+            echo "::error::tag $TAG already exists here; delete its release and tag first to rebuild"
+            exit 1
+          fi
+          case "$TAG" in
+            *-*) prerelease=true ;;
+            *) prerelease=false ;;
+          esac
+          date_iso="${BUILD_DATE:0:4}-${BUILD_DATE:4:2}-${BUILD_DATE:6:2}"
+          # make_latest=false: the rolling nightly-0.7 release stays latest
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+            -f tag_name="$TAG" -f target_commitish="$GITHUB_SHA" \
+            -f name="$TAG — built $date_iso" -F body=@notes.md \
+            -F draft=false -F prerelease="$prerelease" -f make_latest=false \
+            --jq '"published \(.html_url) on tag \(.tag_name)"'

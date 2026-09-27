@@ -17,4 +17,13 @@ the flashing and debugging instructions.
   board that already runs AtomVM with the same partition table. NVS and the
   application in `main.avm` are kept.
 
+There are two kinds of releases:
+
+- **`nightly-0.7`** is rebuilt from AtomVM's `release-0.7` branch and replaced
+  on every build. It is the repository's latest release.
+- **`vX.Y.Z[-pre]`**, such as `v0.7.0-beta.0`, carries the images for that
+  AtomVM release tag. It is built once, the night after the tag appears
+  upstream, and never replaced. Upstream AtomVM publishes the images without
+  features for the same tag.
+
 See the [Releases](../../releases) page for downloads.
