@@ -45,14 +45,15 @@ collect_diag() {
     if [ -f build/CMakeFiles/CMakeConfigureLog.yaml ]; then
         python3 - <<'PY' || true
 import yaml
-log = yaml.safe_load(open("build/CMakeFiles/CMakeConfigureLog.yaml"))
-for event in log.get("events", []):
-    result = event.get("buildResult") or {}
-    if event.get("kind", "").startswith("try_compile") and result.get("exitCode", 0) != 0:
-        print("::group::failed check", result.get("variable"), event.get("checks"))
-        print("C flags:", (event.get("cmakeVariables") or {}).get("CMAKE_C_FLAGS"))
-        print(result.get("stdout", ""))
-        print("::endgroup::")
+# one document per configure run: set-target, then reconfigure
+for log in yaml.safe_load_all(open("build/CMakeFiles/CMakeConfigureLog.yaml")):
+    for event in (log or {}).get("events", []):
+        result = event.get("buildResult") or {}
+        if event.get("kind", "").startswith("try_compile") and result.get("exitCode", 0) != 0:
+            print("::group::failed check", result.get("variable"), event.get("checks"))
+            print("C flags:", (event.get("cmakeVariables") or {}).get("CMAKE_C_FLAGS"))
+            print(result.get("stdout", ""))
+            print("::endgroup::")
 PY
     fi
 }
