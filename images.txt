@@ -7,4 +7,23 @@
 # upstream's release defaults (-O2), because it does not fit the factory
 # partition otherwise. '#' starts a comment.
 
-AtomVM-esp32s3-atomgl-ipv6-libsodium-psram
+AtomVM-esp32-psram
+AtomVM-esp32-atomgl-ipv6-libsodium-psram         # 1.6% free at -O2; esp32 cannot use -Os, see below
+AtomVM-esp32s2-psram
+AtomVM-esp32s2-atomgl-ipv6-libsodium-psram
+AtomVM-esp32s3-psram
+AtomVM-esp32s3-atomgl-ipv6-libsodium-psram       # 1.4% free at -O2; esp32s3 cannot use -Os either
+AtomVM-esp32c2
+AtomVM-esp32c3
+AtomVM-esp32c3-atomgl-ipv6-libsodium -Os         # 97 KiB too big at -O2, 10% free at -Os
+AtomVM-esp32c5-psram
+AtomVM-esp32c5-atomgl-ipv6-libsodium-psram -Os   # 135 KiB too big at -O2, 7% free at -Os
+AtomVM-esp32c6
+AtomVM-esp32c6-atomgl-ipv6-libsodium -Os         # 157 KiB too big at -O2, 7% free at -Os
+AtomVM-esp32c61-psram
+AtomVM-esp32h2
+AtomVM-esp32p4
+
+# Sizes measured on 2026-10-11 (release-0.7 1f37255, atomgl 4a4065a). On
+# esp32 and esp32s3, AtomVM's interpreter (context.c) does not assemble at -Os
+# with the GCC of ESP-IDF 5.5.4: "operand 1 of 'j' has out of range value".
