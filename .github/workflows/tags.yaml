@@ -53,7 +53,7 @@ jobs:
         run: |
           images=$(python3 scripts/images.py --features-only images.txt)
           echo "images=$images" >> "$GITHUB_OUTPUT"
-          jq -r '.[].name' <<< "$images"
+          jq -r '.[].images[].name' <<< "$images"
 
       - name: Choose the tag
         id: tag

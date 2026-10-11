@@ -533,6 +533,14 @@ class ImagesTest(unittest.TestCase):
         listed = self.entries("AtomVM-esp32c6-ipv6 -Os  # does not fit at -O2\nAtomVM-esp32c6\n")
         self.assertEqual([entry["level"] for entry in listed], ["-Os", "-Os", "", ""])
 
+    def test_grouped_by_chip_in_file_order(self):
+        listed = self.entries("AtomVM-esp32s3-psram\nAtomVM-esp32c3\nAtomVM-esp32s3-ipv6-psram\n")
+        groups = images.by_chip(listed)
+        self.assertEqual([group["chip"] for group in groups], ["esp32s3", "esp32c3"])
+        self.assertEqual([entry["name"] for entry in groups[0]["images"]],
+                         ["AtomVM-esp32s3-psram", "AtomVM-esp32s3-psram-elixir",
+                          "AtomVM-esp32s3-ipv6-psram", "AtomVM-esp32s3-ipv6-psram-elixir"])
+
     def test_rejects_bad_lines(self):
         for bad in ["esp32-psram", "AtomVM", "AtomVM-", "AtomVM-esp32--psram", "AtomVM-esp32-psram -O3",
                     "AtomVM-esp32-psram -Os elixir"]:
@@ -550,11 +558,14 @@ class ImagesTest(unittest.TestCase):
         proc = run("images.txt")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(proc.stdout.count("\n"), 1)
-        self.assertEqual(len(json.loads(proc.stdout)), 4)
+        self.assertEqual([(group["chip"], len(group["images"])) for group in json.loads(proc.stdout)],
+                         [("esp32c3", 2), ("esp32", 2)])
         for args in (("--features-only", "images.txt"), ("images.txt", "--features-only")):
             proc = run(*args)
             self.assertEqual(proc.returncode, 0, proc.stderr)
-            self.assertEqual([entry["fragments"] for entry in json.loads(proc.stdout)],
+            groups = json.loads(proc.stdout)
+            self.assertEqual([group["chip"] for group in groups], ["esp32"])
+            self.assertEqual([entry["fragments"] for entry in groups[0]["images"]],
                              ["features/psram.sdkconfig"] * 2)
         listing.write_text("AtomVM-esp32c3\nesp32-psram\n")
         proc = run("images.txt")

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""List the images to build as GitHub Actions matrix entries.
+"""List the images to build, grouped by chip, as GitHub Actions matrix entries.
 
 usage: images.py IMAGES [--features-only]
 
@@ -20,7 +20,9 @@ entries, without and with Elixir support:
 --features-only leaves out the images without features: upstream AtomVM
 publishes those for its release tags.
 
-The entries are printed as a JSON list on one line.
+Prints one line of JSON: a list with one {"chip": ..., "images": [...]} per
+chip, chips and images in the order of IMAGES, so that each Elixir image
+follows the image it shares its firmware with.
 """
 
 import argparse
@@ -82,6 +84,14 @@ def entries(images, base_dir, features_only=False):
     return result
 
 
+def by_chip(entries):
+    """The entries grouped by chip, in order of first appearance."""
+    groups = {}
+    for entry in entries:
+        groups.setdefault(entry["chip"], []).append(entry)
+    return [{"chip": chip, "images": images} for chip, images in groups.items()]
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("images", type=Path)
@@ -93,7 +103,7 @@ def main(argv=None):
     except ImagesError as err:
         print(f"images: {err}", file=sys.stderr)
         return 1
-    print(json.dumps(entries(images, args.images.parent, args.features_only), separators=(",", ":")))
+    print(json.dumps(by_chip(entries(images, args.images.parent, args.features_only)), separators=(",", ":")))
     return 0
 
 

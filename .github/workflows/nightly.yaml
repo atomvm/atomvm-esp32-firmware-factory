@@ -47,7 +47,7 @@ jobs:
         run: |
           images=$(python3 scripts/images.py images.txt)
           echo "images=$images" >> "$GITHUB_OUTPUT"
-          jq -r '.[].name' <<< "$images"
+          jq -r '.[].images[].name' <<< "$images"
 
       - name: Resolve upstream commits
         id: refs

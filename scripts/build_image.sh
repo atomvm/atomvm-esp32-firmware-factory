@@ -5,7 +5,8 @@
 # usage: build_image.sh ENTRY
 #
 # ENTRY is one image as printed by images.py, in JSON. Run from
-# AtomVM/src/platforms/esp32 after the host-side libs build, with:
+# AtomVM/src/platforms/esp32 after the host-side libs build, in a tree as
+# checked out plus, for images with atomgl, atomgl in components/atomgl, with:
 #   VERSION     version component of the image names (channel or tag)
 #   STAMP       ESP-IDF app version (CONFIG_APP_PROJECT_VER)
 #   BUILD_DATE  build date, yyyymmdd
