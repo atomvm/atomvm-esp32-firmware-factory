@@ -9,9 +9,10 @@ gives two entries, without and with Elixir support:
   name       the image name, ending in -elixir for the Elixir image
   chip       the ESP-IDF target
   features   the feature tokens, separated by spaces
-  fragments  the sdkconfig fragments of those features,
-             features/<feature>.sdkconfig where it exists, relative to the
-             directory of IMAGES and separated by spaces
+  fragments  the sdkconfig fragments of those features, relative to the
+             directory of IMAGES and separated by spaces: for each feature
+             features/<feature>.<chip>.sdkconfig, or else
+             features/<feature>.sdkconfig, where it exists
   elixir     true for the Elixir image
 
 --features-only leaves out the images without features: upstream AtomVM
@@ -47,10 +48,15 @@ def parse(text, source):
     return images
 
 
-def fragments(base_dir, features):
-    """The fragment files of the features, relative to base_dir."""
-    paths = (Path("features", f"{feature}.sdkconfig") for feature in features)
-    return [path.as_posix() for path in paths if (Path(base_dir) / path).is_file()]
+def fragments(base_dir, chip, features):
+    """The fragment files of the features on the chip, relative to base_dir."""
+    paths = []
+    for feature in features:
+        for path in (Path("features", f"{feature}.{chip}.sdkconfig"), Path("features", f"{feature}.sdkconfig")):
+            if (Path(base_dir) / path).is_file():
+                paths.append(path.as_posix())
+                break
+    return paths
 
 
 def entries(images, base_dir, features_only=False):
@@ -64,7 +70,7 @@ def entries(images, base_dir, features_only=False):
                 "name": name + ("-elixir" if elixir else ""),
                 "chip": chip,
                 "features": " ".join(features),
-                "fragments": " ".join(fragments(base_dir, features)),
+                "fragments": " ".join(fragments(base_dir, chip, features)),
                 "elixir": elixir,
             })
     return result

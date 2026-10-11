@@ -523,6 +523,12 @@ class ImagesTest(unittest.TestCase):
         self.assertEqual(listed[0]["features"], "atomgl psram")
         self.assertEqual(listed[0]["fragments"], "features/psram.sdkconfig")
 
+    def test_chip_fragment_replaces_generic_one(self):
+        (self.tmp / "features" / "psram.esp32.sdkconfig").write_text("CONFIG_Y=y\n")
+        listed = self.entries("AtomVM-esp32-ipv6-psram\nAtomVM-esp32s3-ipv6-psram\n")
+        self.assertEqual(listed[0]["fragments"], "features/ipv6.sdkconfig features/psram.esp32.sdkconfig")
+        self.assertEqual(listed[2]["fragments"], "features/ipv6.sdkconfig features/psram.sdkconfig")
+
     def test_rejects_bad_lines(self):
         for bad in ["esp32-psram", "AtomVM", "AtomVM-", "AtomVM-esp32--psram", "AtomVM-esp32-psram -O3"]:
             with self.subTest(bad), self.assertRaisesRegex(images.ImagesError, "^images.txt:2: "):
