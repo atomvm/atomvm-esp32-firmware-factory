@@ -121,6 +121,8 @@ jobs:
 
       - name: Prepare sdkconfig and components
         working-directory: ${{ env.ESP32_DIR }}
+        env:
+          LEVEL: ${{ matrix.level }}
         run: |
           cp sdkconfig.release-defaults.in sdkconfig.defaults.in
           fragment_files=()
@@ -131,6 +133,14 @@ jobs:
             --set CONFIG_APP_PROJECT_VER_FROM_CONFIG=y \
             --set "CONFIG_APP_PROJECT_VER=\"$STAMP\"" \
             "${fragment_files[@]}"
+          if [ "$LEVEL" = "-Os" ]; then
+            # rewrite the release default in place: the choice is assigned once
+            if [ "$(grep -c '^CONFIG_COMPILER_OPTIMIZATION_PERF=y$' sdkconfig.defaults.in)" != 1 ]; then
+              echo "::error::-Os needs exactly one CONFIG_COMPILER_OPTIMIZATION_PERF=y line to rewrite"
+              exit 1
+            fi
+            sed -i 's/^CONFIG_COMPILER_OPTIMIZATION_PERF=y$/CONFIG_COMPILER_OPTIMIZATION_SIZE=y/' sdkconfig.defaults.in
+          fi
           echo "::group::sdkconfig.defaults.in"
           cat sdkconfig.defaults.in
           echo "::endgroup::"

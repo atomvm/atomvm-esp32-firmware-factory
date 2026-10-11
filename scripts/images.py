@@ -4,8 +4,9 @@
 usage: images.py IMAGES [--features-only]
 
 IMAGES (images.txt) names one image per line as AtomVM-<chip>[-<feature>...],
-the image file name without the version; '#' starts a comment. Every image
-gives two entries, without and with Elixir support:
+the image file name without the version, optionally followed by -Os to build
+that image optimized for size; '#' starts a comment. Every image gives two
+entries, without and with Elixir support:
   name       the image name, ending in -elixir for the Elixir image
   chip       the ESP-IDF target
   features   the feature tokens, separated by spaces
@@ -14,6 +15,7 @@ gives two entries, without and with Elixir support:
              features/<feature>.<chip>.sdkconfig, or else
              features/<feature>.sdkconfig, where it exists
   elixir     true for the Elixir image
+  level      -Os, or empty for the optimization level of the release defaults
 
 --features-only leaves out the images without features: upstream AtomVM
 publishes those for its release tags.
@@ -32,7 +34,7 @@ class ImagesError(ValueError):
 
 
 def parse(text, source):
-    """Return (name, chip, features) for every image in the text."""
+    """Return (name, chip, features, level) for every image in the text."""
     images = []
     for lineno, raw in enumerate(text.splitlines(), 1):
         line = raw.split("#", 1)[0].strip()
@@ -42,9 +44,12 @@ def parse(text, source):
         tokens = name.split("-")
         if tokens[0] != "AtomVM" or len(tokens) < 2 or not all(tokens):
             raise ImagesError(f"{source}:{lineno}: not an image name AtomVM-<chip>[-<feature>...]: {name!r}")
-        if options:
-            raise ImagesError(f"{source}:{lineno}: unknown option {options[0]!r}")
-        images.append((name, tokens[1], tokens[2:]))
+        level = ""
+        for option in options:
+            if option != "-Os":
+                raise ImagesError(f"{source}:{lineno}: unknown option {option!r}")
+            level = option
+        images.append((name, tokens[1], tokens[2:], level))
     return images
 
 
@@ -62,7 +67,7 @@ def fragments(base_dir, chip, features):
 def entries(images, base_dir, features_only=False):
     """The matrix entries of the images, two per image."""
     result = []
-    for name, chip, features in images:
+    for name, chip, features, level in images:
         if features_only and not features:
             continue
         for elixir in (False, True):
@@ -72,6 +77,7 @@ def entries(images, base_dir, features_only=False):
                 "features": " ".join(features),
                 "fragments": " ".join(fragments(base_dir, chip, features)),
                 "elixir": elixir,
+                "level": level,
             })
     return result
 

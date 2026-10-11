@@ -7,10 +7,12 @@
 # Run from AtomVM/src/platforms/esp32 after the host-side libs build, with
 # sdkconfig.defaults.in already prepared (release defaults + feature fragments).
 #
-# The optimization level is whatever sdkconfig.defaults.in selects (upstream's
-# release defaults choose CONFIG_COMPILER_OPTIMIZATION_PERF, -O2); it is never
-# changed automatically. If the app does not fit the factory partition the
-# build fails, and a human tunes the optimization level explicitly.
+# The optimization level is whatever sdkconfig.defaults.in selects: -O2
+# (CONFIG_COMPILER_OPTIMIZATION_PERF) from upstream's release defaults, or -Os
+# (CONFIG_COMPILER_OPTIMIZATION_SIZE) for images marked -Os in images.txt. It
+# is never changed automatically: if the app does not fit the factory partition
+# the build fails, and a human decides whether the image is built at -Os or
+# left out.
 #
 # Prints "optimization=<DEBUG|SIZE|PERF|NONE>" and appends it to $GITHUB_OUTPUT
 # when that is set.
@@ -52,7 +54,7 @@ if ! {
 then
     if grep -q 'too small for binary' "$log"; then
         echo "error: the app does not fit the factory partition at the configured optimization level;" >&2
-        echo "       tune it explicitly, for instance CONFIG_COMPILER_OPTIMIZATION_SIZE=y (-Os)" >&2
+        echo "       mark the image -Os in images.txt, or leave it out" >&2
     fi
     exit 1
 fi

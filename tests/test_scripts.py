@@ -504,11 +504,11 @@ class ImagesTest(unittest.TestCase):
                          ["AtomVM-esp32c3", "AtomVM-esp32c3-elixir",
                           "AtomVM-esp32-ipv6-psram", "AtomVM-esp32-ipv6-psram-elixir"])
         self.assertEqual(listed[0], {"name": "AtomVM-esp32c3", "chip": "esp32c3", "features": "",
-                                     "fragments": "", "elixir": False})
+                                     "fragments": "", "elixir": False, "level": ""})
         self.assertEqual(listed[3], {"name": "AtomVM-esp32-ipv6-psram-elixir", "chip": "esp32",
                                      "features": "ipv6 psram",
                                      "fragments": "features/ipv6.sdkconfig features/psram.sdkconfig",
-                                     "elixir": True})
+                                     "elixir": True, "level": ""})
 
     def test_features_only(self):
         listed = self.entries("AtomVM-esp32c3\nAtomVM-esp32-psram\nAtomVM-esp32h2\n", features_only=True)
@@ -529,8 +529,13 @@ class ImagesTest(unittest.TestCase):
         self.assertEqual(listed[0]["fragments"], "features/ipv6.sdkconfig features/psram.esp32.sdkconfig")
         self.assertEqual(listed[2]["fragments"], "features/ipv6.sdkconfig features/psram.sdkconfig")
 
+    def test_size_optimized_image(self):
+        listed = self.entries("AtomVM-esp32c6-ipv6 -Os  # does not fit at -O2\nAtomVM-esp32c6\n")
+        self.assertEqual([entry["level"] for entry in listed], ["-Os", "-Os", "", ""])
+
     def test_rejects_bad_lines(self):
-        for bad in ["esp32-psram", "AtomVM", "AtomVM-", "AtomVM-esp32--psram", "AtomVM-esp32-psram -O3"]:
+        for bad in ["esp32-psram", "AtomVM", "AtomVM-", "AtomVM-esp32--psram", "AtomVM-esp32-psram -O3",
+                    "AtomVM-esp32-psram -Os elixir"]:
             with self.subTest(bad), self.assertRaisesRegex(images.ImagesError, "^images.txt:2: "):
                 self.entries("# header\n" + bad + "\n")
 
