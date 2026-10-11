@@ -14,8 +14,7 @@
 # the build fails, and a human decides whether the image is built at -Os or
 # left out.
 #
-# Prints "optimization=<DEBUG|SIZE|PERF|NONE>" and appends it to $GITHUB_OUTPUT
-# when that is set.
+# Prints "optimization=<DEBUG|SIZE|PERF|NONE>" as read from the sdkconfig.
 
 set -euo pipefail
 
@@ -66,6 +65,3 @@ fi
 
 optimization=$(sed -n 's/^CONFIG_COMPILER_OPTIMIZATION_\(DEBUG\|SIZE\|PERF\|NONE\)=y$/\1/p' sdkconfig)
 echo "optimization=$optimization"
-if [ -n "${GITHUB_OUTPUT:-}" ]; then
-    echo "optimization=$optimization" >> "$GITHUB_OUTPUT"
-fi
