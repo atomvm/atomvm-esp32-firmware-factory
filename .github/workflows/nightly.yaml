@@ -30,6 +30,7 @@ jobs:
   setup:
     runs-on: ubuntu-24.04
     outputs:
+      images: ${{ steps.images.outputs.images }}
       release_id: ${{ steps.draft.outputs.release_id }}
       atomvm_sha: ${{ steps.refs.outputs.atomvm_sha }}
       atomgl_sha: ${{ steps.refs.outputs.atomgl_sha }}
@@ -40,6 +41,13 @@ jobs:
 
       - name: Run factory unit tests
         run: python3 -m unittest discover -s tests -v
+
+      - name: List the images
+        id: images
+        run: |
+          images=$(python3 scripts/images.py images.txt)
+          echo "images=$images" >> "$GITHUB_OUTPUT"
+          jq -r '.[].name' <<< "$images"
 
       - name: Resolve upstream commits
         id: refs
@@ -92,6 +100,7 @@ jobs:
     uses: ./.github/workflows/build.yaml
     with:
       version: nightly-0.7
+      images: ${{ needs.setup.outputs.images }}
       atomvm_sha: ${{ needs.setup.outputs.atomvm_sha }}
       atomgl_sha: ${{ needs.setup.outputs.atomgl_sha }}
       build_date: ${{ needs.setup.outputs.build_date }}

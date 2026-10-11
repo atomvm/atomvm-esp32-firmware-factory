@@ -1,6 +1,6 @@
-# Build every image of the matrix for one AtomVM commit and upload each bundle
-# to a draft release created by the caller, then check that the draft holds
-# exactly the expected bundles. Publishing the draft is left to the caller.
+# Build the given images for one AtomVM commit and upload each bundle to a
+# draft release created by the caller, then check that the draft holds exactly
+# the expected bundles. Publishing the draft is left to the caller.
 
 name: build
 
@@ -29,14 +29,18 @@ on:
         description: Id of the draft release receiving the bundles
         required: true
         type: string
+      images:
+        description: Matrix entries of the images to build, as printed by scripts/images.py
+        required: true
+        type: string
 
 env:
   ATOMVM_REPO: atomvm/AtomVM
   ATOMGL_REPO: atomvm/atomgl
-  EXPECTED_ASSETS: "2"
 
 jobs:
   build:
+    name: ${{ matrix.name }}
     runs-on: ubuntu-24.04
     container: espressif/idf:v5.5.4
     defaults:
@@ -45,15 +49,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - chip: esp32s3
-            features: atomgl ipv6 libsodium psram
-            elixir: false
-            name: AtomVM-esp32s3-atomgl-ipv6-libsodium-psram
-          - chip: esp32s3
-            features: atomgl ipv6 libsodium psram
-            elixir: true
-            name: AtomVM-esp32s3-atomgl-ipv6-libsodium-psram-elixir
+        include: ${{ fromJSON(inputs.images) }}
     env:
       # as upstream esp32-mkimage.yaml: host compiler for the libs build,
       # ImageOS lets erlef/setup-beam run inside the container
@@ -66,6 +62,7 @@ jobs:
       LANG: C.UTF-8
       CHIP: ${{ matrix.chip }}
       FEATURES: ${{ matrix.features }}
+      FRAGMENTS: ${{ matrix.fragments }}
       ELIXIR: ${{ matrix.elixir }}
       STEM: ${{ matrix.name }}-${{ inputs.version }}
       ESP32_DIR: AtomVM/src/platforms/esp32
@@ -126,16 +123,14 @@ jobs:
         working-directory: ${{ env.ESP32_DIR }}
         run: |
           cp sdkconfig.release-defaults.in sdkconfig.defaults.in
-          fragments=()
-          for feature in $FEATURES; do
-            if [ -f "$GITHUB_WORKSPACE/factory/features/$feature.sdkconfig" ]; then
-              fragments+=("$GITHUB_WORKSPACE/factory/features/$feature.sdkconfig")
-            fi
+          fragment_files=()
+          for fragment in $FRAGMENTS; do
+            fragment_files+=("$GITHUB_WORKSPACE/factory/$fragment")
           done
           python3 "$GITHUB_WORKSPACE/factory/scripts/apply_fragments.py" sdkconfig.defaults.in \
             --set CONFIG_APP_PROJECT_VER_FROM_CONFIG=y \
             --set "CONFIG_APP_PROJECT_VER=\"$STAMP\"" \
-            "${fragments[@]}"
+            "${fragment_files[@]}"
           echo "::group::sdkconfig.defaults.in"
           cat sdkconfig.defaults.in
           echo "::endgroup::"
@@ -304,21 +299,17 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       RELEASE_ID: ${{ inputs.release_id }}
+      IMAGES: ${{ inputs.images }}
+      VERSION: ${{ inputs.version }}
     steps:
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: meta-*
-          path: meta
-          merge-multiple: true
-
       - name: Check the draft is complete
         run: |
+          set -euo pipefail
           gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?per_page=100" --jq '.[].name' | sort > assets.txt
-          jq -r '.stem + ".zip"' meta/*.json | sort > expected.txt
+          jq -r --arg version "$VERSION" '.[] | "\(.name)-\($version).zip"' <<< "$IMAGES" | sort > expected.txt
           echo "assets on the draft:"; cat assets.txt
-          count=$(wc -l < assets.txt)
-          if [ "$count" != "$EXPECTED_ASSETS" ] || ! cmp -s assets.txt expected.txt; then
-            echo "::error::draft holds $count asset(s), expected $EXPECTED_ASSETS matching the built images; nothing published"
+          if ! cmp -s assets.txt expected.txt; then
+            echo "::error::draft holds $(wc -l < assets.txt) asset(s), expected the $(wc -l < expected.txt) images to build; nothing published"
             diff assets.txt expected.txt || true
             exit 1
           fi

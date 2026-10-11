@@ -36,6 +36,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
+      images: ${{ steps.images.outputs.images }}
       release_id: ${{ steps.draft.outputs.release_id }}
       atomvm_sha: ${{ steps.refs.outputs.atomvm_sha }}
       atomgl_sha: ${{ steps.refs.outputs.atomgl_sha }}
@@ -46,6 +47,13 @@ jobs:
 
       - name: Run factory unit tests
         run: python3 -m unittest discover -s tests -v
+
+      - name: List the images
+        id: images
+        run: |
+          images=$(python3 scripts/images.py --features-only images.txt)
+          echo "images=$images" >> "$GITHUB_OUTPUT"
+          jq -r '.[].name' <<< "$images"
 
       - name: Choose the tag
         id: tag
@@ -136,6 +144,7 @@ jobs:
     uses: ./.github/workflows/build.yaml
     with:
       version: ${{ needs.setup.outputs.tag }}
+      images: ${{ needs.setup.outputs.images }}
       atomvm_sha: ${{ needs.setup.outputs.atomvm_sha }}
       atomgl_sha: ${{ needs.setup.outputs.atomgl_sha }}
       build_date: ${{ needs.setup.outputs.build_date }}
