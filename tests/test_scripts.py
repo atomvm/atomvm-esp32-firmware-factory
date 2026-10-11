@@ -19,6 +19,7 @@ FEATURES = ROOT / "features"
 sys.path.insert(0, str(SCRIPTS))
 
 import apply_fragments  # noqa: E402
+import images  # noqa: E402
 import make_bundle  # noqa: E402
 import select_tag  # noqa: E402
 
@@ -54,7 +55,6 @@ SDKCONFIG = (
 
 STEM = "AtomVM-esp32s3-atomgl-ipv6-libsodium-psram-nightly-0.7"
 ELIXIR_STEM = "AtomVM-esp32s3-atomgl-ipv6-libsodium-psram-elixir-nightly-0.7"
-FULL_PROFILE_FRAGMENTS = ("ipv6", "libsodium", "psram")
 
 
 class ApplyFragmentsTest(unittest.TestCase):
@@ -103,13 +103,14 @@ class ApplyFragmentsTest(unittest.TestCase):
         for path in fragments:
             self.merge([(path.name, path.read_text().splitlines())])
 
-    def test_full_profile_fragments_are_disjoint(self):
-        fragments = [(name, (FEATURES / f"{name}.sdkconfig").read_text().splitlines())
-                     for name in FULL_PROFILE_FRAGMENTS]
-        lines = self.merge(fragments).splitlines()
-        for expected in ("CONFIG_SPIRAM=y", "CONFIG_LWIP_IPV6=y", "CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384"):
-            self.assertEqual(lines.count(expected), 1)
-        self.assertNotIn("CONFIG_LWIP_IPV6=n", lines)
+    def test_listed_images_fragments_are_disjoint(self):
+        listed = images.entries(images.parse((ROOT / "images.txt").read_text(), "images.txt"), ROOT)
+        self.assertTrue(listed)
+        stamp = ["CONFIG_APP_PROJECT_VER_FROM_CONFIG=y", 'CONFIG_APP_PROJECT_VER="nightly-0.7+20260915.02e1603"']
+        for entry in listed:
+            with self.subTest(entry["name"]):
+                fragments = [(path, (ROOT / path).read_text().splitlines()) for path in entry["fragments"].split()]
+                self.merge(fragments, stamp)
 
     def test_cli_rewrites_in_place(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -484,6 +485,70 @@ class VerifyBundleTest(BundleTestCase):
         proc = self.verify(lzma_zip)
         self.assertEqual(proc.returncode, 1)
         self.assertIn("unzip", proc.stderr)
+
+
+class ImagesTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+        (self.tmp / "features").mkdir()
+        for feature in ("ipv6", "psram"):
+            (self.tmp / "features" / f"{feature}.sdkconfig").write_text("CONFIG_X=y\n")
+
+    def entries(self, text, features_only=False):
+        return images.entries(images.parse(text, "images.txt"), self.tmp, features_only)
+
+    def test_elixir_twins_follow_each_image(self):
+        listed = self.entries("AtomVM-esp32c3\nAtomVM-esp32-ipv6-psram\n")
+        self.assertEqual([entry["name"] for entry in listed],
+                         ["AtomVM-esp32c3", "AtomVM-esp32c3-elixir",
+                          "AtomVM-esp32-ipv6-psram", "AtomVM-esp32-ipv6-psram-elixir"])
+        self.assertEqual(listed[0], {"name": "AtomVM-esp32c3", "chip": "esp32c3", "features": "",
+                                     "fragments": "", "elixir": False})
+        self.assertEqual(listed[3], {"name": "AtomVM-esp32-ipv6-psram-elixir", "chip": "esp32",
+                                     "features": "ipv6 psram",
+                                     "fragments": "features/ipv6.sdkconfig features/psram.sdkconfig",
+                                     "elixir": True})
+
+    def test_features_only(self):
+        listed = self.entries("AtomVM-esp32c3\nAtomVM-esp32-psram\nAtomVM-esp32h2\n", features_only=True)
+        self.assertEqual([entry["name"] for entry in listed], ["AtomVM-esp32-psram", "AtomVM-esp32-psram-elixir"])
+
+    def test_comments_and_blank_lines(self):
+        listed = self.entries("# header\n\n  AtomVM-esp32h2  # no features\n#AtomVM-esp32c2\n")
+        self.assertEqual([entry["name"] for entry in listed], ["AtomVM-esp32h2", "AtomVM-esp32h2-elixir"])
+
+    def test_features_without_fragment(self):
+        listed = self.entries("AtomVM-esp32s3-atomgl-psram\n")
+        self.assertEqual(listed[0]["features"], "atomgl psram")
+        self.assertEqual(listed[0]["fragments"], "features/psram.sdkconfig")
+
+    def test_rejects_bad_lines(self):
+        for bad in ["esp32-psram", "AtomVM", "AtomVM-", "AtomVM-esp32--psram", "AtomVM-esp32-psram -O3"]:
+            with self.subTest(bad), self.assertRaisesRegex(images.ImagesError, "^images.txt:2: "):
+                self.entries("# header\n" + bad + "\n")
+
+    def test_cli(self):
+        listing = self.tmp / "images.txt"
+        listing.write_text("AtomVM-esp32c3\nAtomVM-esp32-psram\n")
+
+        def run(*args):
+            return subprocess.run([sys.executable, str(SCRIPTS / "images.py"), *args],
+                                  capture_output=True, text=True, cwd=self.tmp)
+
+        proc = run("images.txt")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.count("\n"), 1)
+        self.assertEqual(len(json.loads(proc.stdout)), 4)
+        for args in (("--features-only", "images.txt"), ("images.txt", "--features-only")):
+            proc = run(*args)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual([entry["fragments"] for entry in json.loads(proc.stdout)],
+                             ["features/psram.sdkconfig"] * 2)
+        listing.write_text("AtomVM-esp32c3\nesp32-psram\n")
+        proc = run("images.txt")
+        self.assertEqual((proc.returncode, proc.stdout), (1, ""))
+        self.assertTrue(proc.stderr.startswith("images: images.txt:2: "), proc.stderr)
 
 
 class SelectTagTest(unittest.TestCase):

@@ -1,0 +1,8 @@
+# Images built by the factory, one per line: AtomVM-<chip>[-<feature>...],
+# the name of the image file without the version, with the features sorted.
+# Every image is built twice, without and with Elixir support; the second one
+# is named with -elixir. Images without features are built for the nightly
+# channel only: upstream AtomVM publishes them for its release tags.
+# '#' starts a comment.
+
+AtomVM-esp32s3-atomgl-ipv6-libsodium-psram
